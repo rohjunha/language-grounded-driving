@@ -1,3 +1,4 @@
 # Conditional Driving from Natural Language Instructions
 Self-driving cars have a challenging problem: they need to be able to get to any possible destination, even ones that are not properly mapped. To this end, it would be very helpful if they could follow instructions from their passengers on where to go and how to get there. We propose a language grounded driving agent with a two-level hierarchy using recurrent layers and Gated Attention. The hierarchy divides the problem into simpler sub-problems of predicting a sequence of sub-tasks and learning corresponding control policies for each sub-task from demonstration data, allowing us to go from pixels and natural language to control of a vehicle. We show how our system can generalize to new environments,and allows a human user to interactively navigate a vehicle through a simulated environment using natural language commands.
 
+![Cover image](./cover.png)
