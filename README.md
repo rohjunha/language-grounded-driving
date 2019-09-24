@@ -1,6 +1,8 @@
 # Conditional Driving from Natural Language Instruction
 This is an implementation of CoRL 2019 paper "Conditional Driving from Natural Language Instruction" by Roh et al. [[pdf]()][[project](https://sites.google.com/view/language-grounded-driving)]
 
+![cover-image](cover.png)
+
 ## Citing the paper
 If you use "Conditional Driving from Natural Language Instruction" in your research, please cite the paper:
 ```bibtex
