@@ -1,0 +1,13 @@
+msgpack-python
+numpy
+opencv-python
+tb-nightly
+imageio
+imageio-ffmpeg
+pygame
+matplotlib
+future
+zmq
+networkx
+tqdm
+lmdb

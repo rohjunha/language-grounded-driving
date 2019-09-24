@@ -1,0 +1,38 @@
+{
+    "port": 5555,
+    "keywords": [
+        "left",
+        "right",
+        "straight",
+        "left,left",
+        "left,right",
+        "left,straight",
+        "right,left",
+        "right,right",
+        "right,straight",
+        "straight,straight",
+        "firstleft",
+        "firstright",
+        "secondleft",
+        "secondright"
+    ],
+    "control": {
+        "index": 40,
+        "name": "control-town1-gs",
+        "step": 100000
+    },
+    "stop": {
+        "index": 40,
+        "name": "stop-town1-gs",
+        "step": 100000
+    },
+    "high": {
+        "index": 40,
+        "name": "high-town1-gs",
+        "step": 100000
+    },
+    "data": {
+        "name": "semantic1",
+        "version": 37
+    }
+}
