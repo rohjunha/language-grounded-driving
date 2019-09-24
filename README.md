@@ -22,8 +22,8 @@ You would be able to run the evaluation code if you follow the instruction step 
 We recommend using `anaconda` to setup the environment for the code.
 Here's a list important libraries that are used in the code:
 * python==3.7
-* pytorch==1.1
-* tensorflow-gpu==1.13
+* pytorch==1.2
+* tensorflow-gpu==1.14
 
 These libraries will be installed if you follow the guide below.
 
