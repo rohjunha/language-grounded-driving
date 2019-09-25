@@ -8,7 +8,7 @@ If you use "Conditional Driving from Natural Language Instruction" in your resea
 ```bibtex
 @inproceedings{Roh2019Conditional,
   title={{C}onditional {D}riving from {N}atural {L}anguage {I}nstruction},
-  author={Roh, Junha and Paxton, Chris and Pronobis, Andrzej and Farhadi, Ali and Fox, Dieter},
+  author={Junha Roh and Chris Paxton and Andrzej Pronobis and Ali Farhadi and Dieter Fox},
   booktitle={CoRL},
   year={2019}
 }
