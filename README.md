@@ -7,7 +7,7 @@ This is an implementation of CoRL 2019 paper "Conditional Driving from Natural L
 If you use "Conditional Driving from Natural Language Instruction" in your research, please cite the paper:
 ```bibtex
 @inproceedings{Roh2019Conditional,
-  title={Conditional Driving from Natural Language Instruction},
+  title={{C}onditional {D}riving from {N}atural {L}anguage {I}nstruction},
   author={Roh, Junha and Paxton, Chris and Pronobis, Andrzej and Farhadi, Ali and Fox, Dieter},
   booktitle={CoRL},
   year={2019}
