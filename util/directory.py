@@ -193,6 +193,7 @@ class EvaluationDirectory:
         self.image_dir = mkdir_if_not_exists(self.root_dir / 'images')
         self.segment_dir = mkdir_if_not_exists(self.root_dir / 'segments')
         self.video_dir = mkdir_if_not_exists(self.root_dir / 'videos')
+        self.audio_dir = mkdir_if_not_exists(self.root_dir / 'audios')
         self.state_dir = mkdir_if_not_exists(self.root_dir / 'states')
         self.summary_dir = mkdir_if_not_exists(self.root_dir / 'summary')
         self.summary_path = self.summary_dir / 'summary.json'
@@ -202,6 +203,12 @@ class EvaluationDirectory:
 
     def state_path(self, traj_index: int) -> Path:
         return self.state_dir / 'traj{:02d}.json'.format(traj_index)
+
+    def audio_path(self, timestamp) -> Path:
+        return self.audio_dir / '{}.wav'.format(timestamp)
+
+    def timing_path(self, traj_index: int) -> Path:
+        return self.audio_dir / 'timing{:02d}.json'.format(traj_index)
 
     def traj_indices_from_state_dir(self) -> Set[int]:
         eval_state_files = sorted(self.state_dir.glob('*.json'))

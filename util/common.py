@@ -95,3 +95,8 @@ def timethis(func):
 
 def fetch_node_name() -> str:
     return platform.node().lower()
+
+
+def get_current_time():
+    """Return Current Time in MS."""
+    return int(round(time() * 1000))

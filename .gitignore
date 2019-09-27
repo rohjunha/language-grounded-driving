@@ -2,4 +2,5 @@ carla
 __pycache__
 resources
 custom_carla/.gitignore
+.carla/carla
 .idea

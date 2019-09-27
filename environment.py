@@ -16,7 +16,7 @@ from custom_carla.agents.navigation.roaming_agent import RoamingAgent
 
 from config import EVAL_FRAMERATE_SCALE, DATASET_FRAMERATE, CAMERA_KEYWORDS
 from data.types import CarState, CarControl, DriveDataFrame
-from util.common import add_carla_module, get_logger, get_timestamp, set_random_seed
+from util.common import add_carla_module, get_logger, get_timestamp, set_random_seed, get_current_time
 from util.directory import ExperimentDirectory
 from util.serialize import str_from_waypoint
 
@@ -248,7 +248,7 @@ for key in CAMERA_KEYWORDS:
 
 
 class CameraSensor(SensorBase):
-    def __init__(self, parent_actor, image_path_func, width, height, camera_keyword: str):
+    def __init__(self, parent_actor, image_path_func, timing_dict, width, height, camera_keyword: str):
         self.width = width
         self.height = height
         self.camera_keyword = camera_keyword
@@ -256,6 +256,7 @@ class CameraSensor(SensorBase):
         self.image_path_func = image_path_func
         self.image_frame_number = None
         self.image_frame = None
+        self.timing_dict = timing_dict
         weak_self = weakref.ref(self)
         self.sensor.listen(lambda image: CameraSensor.on_listen(weak_self, image))
 
@@ -272,6 +273,7 @@ class CameraSensor(SensorBase):
         if not self:
             return
         frame_number = carla_image.frame_number
+        self.timing_dict[frame_number] = get_current_time()
         self.image_frame_number = frame_number
         numpy_image = numpy_from_carla_image(carla_image)
         self.image_frame = numpy_image
@@ -326,6 +328,7 @@ class SynchronousAgent(ExperimentDirectory):
         self.camera_sensor_dict = None
         self.segment_sensor_dict = None
         self.collision_sensor = None
+        self.timing_dict = dict()
 
         self.args = args
         self.agent_type = agent_type
@@ -454,13 +457,15 @@ class SynchronousAgent(ExperimentDirectory):
             camera_keyword: CameraSensor(
                 self.vehicle,
                 partial(self.image_path, camera_keyword=camera_keyword),
+                self.timing_dict,
                 self.image_width,
                 self.image_height,
                 camera_keyword)
             for camera_keyword in self.camera_keywords}
         self.camera_sensor_dict['extra'] = CameraSensor(
             self.vehicle, partial(self.image_path, camera_keyword='extra'),
-            640, 480, 'extra')
+            self.timing_dict, 320, 240, 'extra')
+            # self.timing_dict, 640, 480, 'extra')
 
     def set_segment_sensor(self):
         self.segment_sensor_dict = {

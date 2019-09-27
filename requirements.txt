@@ -11,3 +11,6 @@ zmq
 networkx
 tqdm
 lmdb
+pyaudio
+moviepy
+google-cloud-speech

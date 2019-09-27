@@ -391,7 +391,7 @@ class EvaluationEnvironmentBase(GameEnvironment, EvaluationDirectory):
         return self.eval_param.exp_index, self.eval_param.exp_name, self.evaluator.step, 'online'
 
 
-class AllOfflineEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
+class OfflineEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
     def __init__(self, eval_keyword: str, args):
         self.eval_keyword = eval_keyword
         GameEnvironment.__init__(self, args=args, agent_type='evaluation')
@@ -739,7 +739,7 @@ def get_random_sentence_from_keyword(keyword: str) -> str:
     return sentence
 
 
-class AllOnlineEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
+class OnlineEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
     def __init__(self, eval_keyword: str, args):
         self.eval_keyword = eval_keyword
         args.show_game = True
@@ -1112,7 +1112,7 @@ def launch_experiment_from_json(exp_name: str, online: bool):
             prepare_model(data[key])
 
     args = ExperimentArgument(exp_name, data)
-    cls = AllOnlineEvaluationEnvironment if online else AllOfflineEvaluationEnvironment
+    cls = OnlineEvaluationEnvironment if online else OfflineEvaluationEnvironment
     for keyword in args.eval_keywords:
         eval_env = cls(eval_keyword=keyword, args=args)
         if not eval_env.run():
