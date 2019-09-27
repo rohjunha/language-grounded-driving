@@ -13,7 +13,8 @@ from msgpack import packb, unpackb
 from torch._six import int_classes, string_classes
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader, WeightedRandomSampler
-from torch.utils.data.dataloader import _MultiProcessingDataLoaderIter as OriginalDataLoaderIter
+# from torch.utils.data.dataloader import _MultiProcessingDataLoaderIter as OriginalDataLoaderIter
+from torch.utils.data.dataloader import _DataLoaderIter as OriginalDataLoaderIter
 from torchvision.transforms import RandomApply, ColorJitter
 
 from config import CAMERA_KEYWORDS

@@ -4,7 +4,9 @@ from operator import itemgetter
 from pathlib import Path
 from moviepy import editor
 
-from util.common import unique_with_islices
+from util.common import unique_with_islices, get_logger
+
+logger = get_logger(__name__)
 
 
 def generate_online_video():
@@ -168,7 +170,7 @@ def generate_single_video_with_audio(root_dir, traj_index: int):
     audio_file_list = sorted(audio_dir.glob('*.wav'))
     audio_file_list = list(filter(lambda x: t1 < int(x.stem) < t2, audio_file_list))
     audio_timing_list = list(map(lambda x: int(x.stem), audio_file_list))
-    print(audio_timing_list[0], audio_timing_list[-1])
+    logger.info('generated audio timing info {}, {}'.format(audio_timing_list[0], audio_timing_list[-1]))
 
     timing_offset = frame_timing_dict[frame_list[0]]
     image_timing_list = [(frame_timing_dict[f] - timing_offset) / 1e3 for f in frame_list]
@@ -184,6 +186,8 @@ def generate_single_video_with_audio(root_dir, traj_index: int):
         clip = clip.set_duration(image_duration)
         clip = clip.set_start(image_timing, True)
         image_clip_list.append(clip)
+    logger.info('generated image clips {}'.format(len(image_clip_list)))
+
     audio_clip_list = []
     for audio_file, audio_timing in zip(audio_file_list, audio_timing_list):
         try:
@@ -193,11 +197,14 @@ def generate_single_video_with_audio(root_dir, traj_index: int):
         except:
             print('failed in {}'.format(audio_file))
             continue
+    logger.info('generated audio clips {}'.format(len(audio_clip_list)))
 
     text_clips = generate_text_clips(state_path, frame_timing_dict)
+    logger.info('generated text clips {}'.format(len(text_clips)))
+
     cvc = editor.CompositeVideoClip(image_clip_list + text_clips)
     cac = editor.CompositeAudioClip(audio_clip_list)
-    cvc = cvc.set_fps(30)
+    cvc = cvc.set_fps(15)
     cvc = cvc.set_audio(cac)
     cvc.write_videofile(str(out_vid_path))
 
@@ -220,7 +227,7 @@ def generate_video_with_audio(root_dir: Path):
 
 
 if __name__ == '__main__':
-    root_dir = Path.home() / 'projects/language-grounded-driving/.carla/evaluations/exp40/ls-town2/step072500/online'
-    # generate_video_with_audio(root_dir)
-    for t in [6, 8]:
-        generate_single_video_with_audio(root_dir, t)
+    root_dir = Path.home() / 'projects/language-grounded-driving/.carla/evaluations/exp40/ls-town2/step072500/online.bad3'
+    generate_video_with_audio(root_dir)
+    #for t in [7]:
+    #    generate_single_video_with_audio(root_dir, t)

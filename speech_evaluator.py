@@ -744,6 +744,16 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
                 if self.sentence is None:
                     status['finished'] = True
                     break
+                keyword = 'left,right'
+                self.eval_keyword = keyword
+                self.control_param.eval_keyword = keyword
+                self.stop_param.eval_keyword = keyword
+                self.high_param.eval_keyword = keyword
+                self.control_evaluator.param = self.control_param
+                self.stop_evaluator.param = self.stop_param
+                self.high_evaluator.cmd = keyword
+                self.high_evaluator.param = self.high_param
+                self.high_evaluator.sentence = keyword.lower()
                 self.control_evaluator.initialize()
                 self.stop_evaluator.initialize()
                 self.high_evaluator.initialize()
