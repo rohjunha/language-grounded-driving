@@ -13,7 +13,8 @@ from multiprocessing import Queue, Process, Event
 from operator import attrgetter, itemgetter
 from pathlib import Path
 from time import sleep
-from typing import Dict
+from typing import Dict, Tuple, List
+from PIL import Image, ImageDraw, ImageFont
 
 import cv2
 import pyaudio
@@ -40,7 +41,7 @@ import re
 from config import EVAL_FRAMERATE_SCALE
 from data.dataset import generate_templated_sentence_dict
 from util.road_option import fetch_high_level_command_from_index
-from util.image import video_from_files
+from util.image import video_from_files, video_from_memory
 
 __keyword_from_input__ = {
     'j': 'left',
@@ -134,7 +135,8 @@ class ResumableMicrophoneStream:
     def _fill_buffer(self, in_data, *args, **kwargs):
         """Continuously collect data from the audio stream, into the buffer."""
         # for timestamp, audio in mic_manager.audio_with_timing.items():
-        # self.audio_with_timing[timestamp] = in_data
+        timestamp = get_current_time()
+        self.audio_with_timing[timestamp] = in_data
         # self._save_audio(in_data)
         self._buff.put(in_data)
         return None, pyaudio.paContinue
@@ -144,7 +146,6 @@ class ResumableMicrophoneStream:
 
         while not self.closed and not self.event.is_set():
             data = []
-            timestamp = get_current_time()
             if self.new_stream and self.last_audio_input:
 
                 chunk_time = STREAMING_LIMIT / len(self.last_audio_input)
@@ -191,7 +192,7 @@ class ResumableMicrophoneStream:
                     break
 
             final_data = b''.join(data)
-            self._save_audio(timestamp, final_data)
+            # self._save_audio(timestamp, final_data)
             yield final_data
 
 
@@ -533,7 +534,7 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
         video_from_files(final_image_files, self.video_dir / 'segment{:02d}.mp4'.format(t),
                          texts=[], framerate=30, revert=False)
 
-    def export_evaluation_data(self, t: int, curr_eval_data: dict) -> bool:
+    def export_evaluation_data(self, t: int, curr_eval_data: dict, timing_range: Tuple[int, int]) -> bool:
         with open(str(self.state_path(t)), 'w') as file:
             json.dump(curr_eval_data, file, indent=2)
 
@@ -546,7 +547,7 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
         self.export_video(t, 'center', curr_eval_data)
         self.export_video(t, 'extra', curr_eval_data)
         self.export_segment_video(t)
-        self.export_video_with_audio(t, timing_dict, curr_eval_data)
+        self.export_video_with_audio(t, timing_range, timing_dict, curr_eval_data)
 
         return self.state_path(t).exists()
 
@@ -562,29 +563,113 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
             json.dump(target_sensor.timing_dict, file, indent=4)
         return target_sensor.timing_dict
 
-    def export_video_with_audio(self, t: int, frame_timing_dict, curr_eval_data):
+    def export_video_with_audio(self, t: int, timing_range: Tuple[int, int], frame_timing_dict, curr_eval_data):
         out_vid_path = self.video_dir / 'traj{:02d}r.mp4'.format(t)
+
+        # audio range in
+        # image frames
+        # game timing range
+        # TODO: think about it from the scratch
 
         def image_path_func(frame: int):
             return self.image_dir / '{:08d}e.png'.format(frame)
 
-        frame_list = sorted(frame_timing_dict.keys())
+        frame_range = curr_eval_data['frame_range']
+        sentences = curr_eval_data['sentences']
+        subgoals = list(map(itemgetter(1), curr_eval_data['stop_frames']))
+        sentence_dict = {f: s for f, s in zip(range(*frame_range), sentences)}
+        subgoal_dict = {f: s for f, s in zip(range(*frame_range), subgoals)}
+
+        frame_list: List[int] = sorted(frame_timing_dict.keys())
         frame_list = list(filter(lambda x: image_path_func(x).exists(), frame_list))
-        raw_timing_list = [frame_timing_dict[f] for f in frame_list]
-        t1, t2 = raw_timing_list[0], raw_timing_list[-1]
+        frame_list = list(filter(lambda x: timing_range[0] <= frame_timing_dict[x] < timing_range[1], frame_list))
+        frame_list = list(filter(lambda x: frame_range[0] <= x < frame_range[1], frame_list))
 
-        # audio_timing_list = sorted(self.audio_dict.keys())
-        # audio_timing_list = list(filter(lambda x: t1 < x < t2, audio_timing_list))
-        # for audio_timing in audio_timing_list:
-        #     audio_value = self.audio_dict[audio_timing]
-        #     waveFile = wave.open(str(self.audio_path(audio_timing)), 'wb')
-        #     waveFile.setnchannels(self.audio_setup_dict['setnchannels'])
-        #     waveFile.setsampwidth(self.audio_setup_dict['setsampwidth'])
-        #     waveFile.setframerate(self.audio_setup_dict['setframerate'])
-        #     waveFile.writeframes(audio_value)
-        #     waveFile.close()
+        # read images from frame_list
+        f1, f2 = frame_list[0], frame_list[-1] + 1
+        raw_image_dict = {f: Image.open(str(image_path_func(f))) for f in frame_list}
 
-        self.video_queue.put((self.root_dir, t))
+        font = ImageFont.truetype('Roboto-Bold.ttf', size=45)
+        def draw(image, font, text, pos, color):
+            ImageDraw.Draw(image).text(pos, text, fill='rgb({}, {}, {})'.format(color[2], color[1], color[0]), font=font)
+
+        sentence_list = [sentence_dict[f] for f in range(max(f1, frame_range[0]), min(f2, frame_range[1]))]
+        subgoal_list = [subgoal_dict[f] for f in range(max(f1, frame_range[0]), min(f2, frame_range[1]))]
+        last_image_index = 0
+        last_image_frame = f1
+        image_frame_indices = [-1] * len(range(f1, f2))
+        for i, f in enumerate(range(f1, f2)):
+            if last_image_index < len(frame_list) - 1:
+                next_image_frame = frame_list[last_image_index + 1]
+                if f < next_image_frame:
+                    image_frame_indices[i] = last_image_frame
+                elif f == next_image_frame:
+                    image_frame_indices[i] = next_image_frame
+                    last_image_index += 1
+                    last_image_frame = frame_list[last_image_index]
+                else:
+                    raise ValueError('invalid f value: {}'.format(f))
+            else:
+                image_frame_indices[i] = frame_list[-1]
+        image_list = [raw_image_dict[f] for f in image_frame_indices]
+        for i, (image, sentence, subgoal) in enumerate(zip(image_list, sentence_list, subgoal_list)):
+            draw(image, font, sentence, (30, 30), (255, 255, 255))
+            draw(image, font, subgoal, (30, 60), (0, 255, 255))
+        image_list = [np.array(i) for i in image_list]
+
+        video_from_memory(image_list, Path.home() / '.tmp/audio/test.mp4')
+        # ts1 = frame_timing_dict[frame_list[0]]
+        # ts2 = frame_timing_dict[frame_list[-1]]
+
+
+        # def generate_text_clips():
+        #     frame_range = curr_eval_data['frame_range']
+        #     sentences = curr_eval_data['sentences']
+        #     subgoals = list(map(itemgetter(1), curr_eval_data['stop_frames']))
+        #     sentence_index_list = unique_with_islices(sentences)
+        #     subtask_index_list = unique_with_islices(subgoals)
+        #
+        #     def _generate_text_clips(text_index_list, prefix, fontsize, pos, color='white'):
+        #         clips = []
+        #         for sentence, local_frame_range in text_index_list:
+        #             local_frame_range = [v + frame_range[0] for v in local_frame_range]
+        #             start_time, end_time = None, None
+        #             for frame in range(*local_frame_range):
+        #                 if frame not in frame_timing_dict:
+        #                     continue
+        #                 timing = frame_timing_dict[frame]
+        #                 if start_time is None or timing < start_time:
+        #                     start_time = timing
+        #                 if end_time is None or timing > end_time:
+        #                     end_time = timing
+        #             if start_time is None or end_time is None or start_time > end_time:
+        #                 print('failed to find proper timing from {}, {}'.format(sentence, local_frame_range))
+        #             text_clip = editor.TextClip(
+        #                 prefix + sentence + ' ', fontsize=fontsize, color=color, bg_color='black',
+        #                 font='Lato-Medium')
+        #             text_clip = text_clip.set_start(start_time, False).set_end(end_time)
+        #             text_clip = text_clip.set_position(pos)
+        #             clips.append(text_clip)
+        #         return clips
+        #
+        #     clips = _generate_text_clips(sentence_index_list, ' sentence: ', 27, (30, 360)) + \
+        #             _generate_text_clips(subtask_index_list, ' sub-task : ', 27, (30, 393), 'yellow')
+        #
+        # raw_timing_list = [frame_timing_dict[f] for f in frame_list]
+        # t1, t2 = raw_timing_list[0], raw_timing_list[-1]
+        #
+        # # audio_timing_list = sorted(self.audio_dict.keys())
+        # # audio_timing_list = list(filter(lambda x: t1 < x < t2, audio_timing_list))
+        # # for audio_timing in audio_timing_list:
+        # #     audio_value = self.audio_dict[audio_timing]
+        # #     waveFile = wave.open(str(self.audio_path(audio_timing)), 'wb')
+        # #     waveFile.setnchannels(self.audio_setup_dict['setnchannels'])
+        # #     waveFile.setsampwidth(self.audio_setup_dict['setsampwidth'])
+        # #     waveFile.setframerate(self.audio_setup_dict['setframerate'])
+        # #     waveFile.writeframes(audio_value)
+        # #     waveFile.close()
+        #
+        # self.video_queue.put((self.root_dir, t))
 
         # cvc = editor.CompositeVideoClip(image_clip_list + text_clips)
         # cvc = cvc.set_fps(30)
@@ -730,6 +815,7 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
         set_world_synchronous(self.world)
 
         stop_buffer = []
+        timing_range = [get_current_time()]
 
         while not status['exited'] or not status['collided']:
             keyboard_input = listen_keyboard()
@@ -823,10 +909,12 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
             self.final_images.append(final_image)
 
             count += 1
+
+        timing_range.append(get_current_time())
         logger.info('saving information')
         curr_eval_data = self.agent.export_eval_data(status['collided'], self.sentence)
         if curr_eval_data is not None:
-            status['saved'] = self.export_evaluation_data(t, curr_eval_data)
+            status['saved'] = self.export_evaluation_data(t, curr_eval_data, timing_range)
         return status
 
     def run(self) -> bool:
