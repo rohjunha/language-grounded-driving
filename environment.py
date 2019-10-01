@@ -565,7 +565,7 @@ class SynchronousAgent(ExperimentDirectory):
             if self.data_frame_number is not None and self.data_frame_number in self.data_frame_dict:
                 velocity = self.data_frame_dict[self.data_frame_number].state.velocity
                 speed = 3.6 * math.sqrt(velocity.x ** 2 + velocity.y ** 2 + velocity.z ** 2)
-                logger.info('speed {:+5.3f}'.format(speed))
+                # logger.info('speed {:+5.3f}'.format(speed))
                 if speed > 20:
                     vehicle_control.throttle = 0.0
             self.vehicle.apply_control(vehicle_control)

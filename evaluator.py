@@ -155,7 +155,7 @@ class HighLevelEvaluator(CheckpointBase):
         self.images.append(_tensor_from_numpy_image(image))
         self.images = self.images[-10:]
         data_dict = {
-            'sentence': sentence,
+            'sentence': sentence.strip(),
             'word_indices': word_indices,
             'length': length,
             'images': torch.cat(self.images, dim=1)
