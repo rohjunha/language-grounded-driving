@@ -9,9 +9,11 @@ import argparse
 import json
 import shutil
 import wave
+from functools import partial
 from multiprocessing import Queue, Process, Event
 from operator import attrgetter, itemgetter
 from pathlib import Path
+from subprocess import run
 from time import sleep
 from typing import Dict, Tuple, List
 from PIL import Image, ImageDraw, ImageFont
@@ -69,9 +71,22 @@ GREEN = '\033[0;32m'
 YELLOW = '\033[0;33m'
 STREAMING_LIMIT = 10000
 SAMPLE_RATE = 16000
+SAMPLE_WIDTH = 2
 CHUNK_SIZE = int(SAMPLE_RATE / 10)  # 100ms
 from google.cloud import speech_v1p1beta1 as speech
 from multiprocessing import Manager
+
+
+TARGET_FPS = 15
+
+
+def save_audio(audio_path, in_data):
+    waveFile = wave.open(str(audio_path), 'wb')
+    waveFile.setnchannels(1)
+    waveFile.setsampwidth(SAMPLE_WIDTH)
+    waveFile.setframerate(SAMPLE_RATE)
+    waveFile.writeframes(in_data)
+    waveFile.close()
 
 
 class ResumableMicrophoneStream:
@@ -574,50 +589,54 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
         def image_path_func(frame: int):
             return self.image_dir / '{:08d}e.png'.format(frame)
 
-        frame_range = curr_eval_data['frame_range']
-        sentences = curr_eval_data['sentences']
-        subgoals = list(map(itemgetter(1), curr_eval_data['stop_frames']))
-        sentence_dict = {f: s for f, s in zip(range(*frame_range), sentences)}
-        subgoal_dict = {f: s for f, s in zip(range(*frame_range), subgoals)}
+        # frame_range = curr_eval_data['frame_range']
+        # sentences = curr_eval_data['sentences']
+        # subgoals = list(map(itemgetter(1), curr_eval_data['stop_frames']))
+        # sentence_dict = {f: s for f, s in zip(range(*frame_range), sentences)}
+        # subgoal_dict = {f: s for f, s in zip(range(*frame_range), subgoals)}
+        #
+        # frame_list: List[int] = sorted(frame_timing_dict.keys())
+        # frame_list = list(filter(lambda x: image_path_func(x).exists(), frame_list))
+        # frame_list = list(filter(lambda x: timing_range[0] <= frame_timing_dict[x] < timing_range[1], frame_list))
+        # frame_list = list(filter(lambda x: frame_range[0] <= x < frame_range[1], frame_list))
+        #
+        # # read images from frame_list
+        # f1, f2 = frame_list[0], frame_list[-1] + 1
+        # raw_image_dict = {f: Image.open(str(image_path_func(f))) for f in frame_list}
+        #
+        # font = ImageFont.truetype('Roboto-Bold.ttf', size=45)
+        # def draw(image, font, text, pos, color):
+        #     ImageDraw.Draw(image).text(pos, text, fill='rgb({}, {}, {})'.format(color[2], color[1], color[0]), font=font)
+        #
+        # sentence_list = [sentence_dict[f] for f in range(max(f1, frame_range[0]), min(f2, frame_range[1]))]
+        # subgoal_list = [subgoal_dict[f] for f in range(max(f1, frame_range[0]), min(f2, frame_range[1]))]
+        # last_image_index = 0
+        # last_image_frame = f1
+        # image_frame_indices = [-1] * len(range(f1, f2))
+        # for i, f in enumerate(range(f1, f2)):
+        #     if last_image_index < len(frame_list) - 1:
+        #         next_image_frame = frame_list[last_image_index + 1]
+        #         if f < next_image_frame:
+        #             image_frame_indices[i] = last_image_frame
+        #         elif f == next_image_frame:
+        #             image_frame_indices[i] = next_image_frame
+        #             last_image_index += 1
+        #             last_image_frame = frame_list[last_image_index]
+        #         else:
+        #             raise ValueError('invalid f value: {}'.format(f))
+        #     else:
+        #         image_frame_indices[i] = frame_list[-1]
+        # image_list = [raw_image_dict[f] for f in image_frame_indices]
+        # for i, (image, sentence, subgoal) in enumerate(zip(image_list, sentence_list, subgoal_list)):
+        #     draw(image, font, sentence, (30, 30), (255, 255, 255))
+        #     draw(image, font, subgoal, (30, 60), (0, 255, 255))
+        # image_list = [np.array(i) for i in image_list]
+        #
+        # video_from_memory(image_list, Path.home() / '.tmp/audio/test.mp4')
 
-        frame_list: List[int] = sorted(frame_timing_dict.keys())
-        frame_list = list(filter(lambda x: image_path_func(x).exists(), frame_list))
-        frame_list = list(filter(lambda x: timing_range[0] <= frame_timing_dict[x] < timing_range[1], frame_list))
-        frame_list = list(filter(lambda x: frame_range[0] <= x < frame_range[1], frame_list))
 
-        # read images from frame_list
-        f1, f2 = frame_list[0], frame_list[-1] + 1
-        raw_image_dict = {f: Image.open(str(image_path_func(f))) for f in frame_list}
 
-        font = ImageFont.truetype('Roboto-Bold.ttf', size=45)
-        def draw(image, font, text, pos, color):
-            ImageDraw.Draw(image).text(pos, text, fill='rgb({}, {}, {})'.format(color[2], color[1], color[0]), font=font)
 
-        sentence_list = [sentence_dict[f] for f in range(max(f1, frame_range[0]), min(f2, frame_range[1]))]
-        subgoal_list = [subgoal_dict[f] for f in range(max(f1, frame_range[0]), min(f2, frame_range[1]))]
-        last_image_index = 0
-        last_image_frame = f1
-        image_frame_indices = [-1] * len(range(f1, f2))
-        for i, f in enumerate(range(f1, f2)):
-            if last_image_index < len(frame_list) - 1:
-                next_image_frame = frame_list[last_image_index + 1]
-                if f < next_image_frame:
-                    image_frame_indices[i] = last_image_frame
-                elif f == next_image_frame:
-                    image_frame_indices[i] = next_image_frame
-                    last_image_index += 1
-                    last_image_frame = frame_list[last_image_index]
-                else:
-                    raise ValueError('invalid f value: {}'.format(f))
-            else:
-                image_frame_indices[i] = frame_list[-1]
-        image_list = [raw_image_dict[f] for f in image_frame_indices]
-        for i, (image, sentence, subgoal) in enumerate(zip(image_list, sentence_list, subgoal_list)):
-            draw(image, font, sentence, (30, 30), (255, 255, 255))
-            draw(image, font, subgoal, (30, 60), (0, 255, 255))
-        image_list = [np.array(i) for i in image_list]
-
-        video_from_memory(image_list, Path.home() / '.tmp/audio/test.mp4')
         # ts1 = frame_timing_dict[frame_list[0]]
         # ts2 = frame_timing_dict[frame_list[-1]]
 
@@ -1038,6 +1057,259 @@ def main():
     for p in processes:
         p.join()
 
+    audio_start_time = sorted(audio_dict.keys())[0]
+    audio_data = b''.join([audio_dict[k] for k in sorted(audio_dict.keys())])
+    save_audio(dir.audio_path(audio_start_time), audio_data)
+
+
+def interpolate_timing_by_frame(query_frame: int, timing_dict: Dict[int, int], sorted_frames: List[int]) -> int:
+    if query_frame in timing_dict:
+        return timing_dict[query_frame]
+
+    n1_index, n1_frame, n1_dist = -1, -1, 1e10
+    n2_index, n2_frame, n2_dist = -1, -1, 1e10
+    for i, frame in enumerate(sorted_frames):
+        dist = abs(query_frame - frame)
+        if query_frame <= frame:
+            if dist < n1_dist:
+                n1_dist = dist
+                n1_index = i
+                n1_frame = frame
+        else:
+            if dist < n2_dist:
+                n2_dist = dist
+                n2_index = i
+                n2_frame = frame
+
+    if n1_frame >= 0 and n2_frame >= 0:
+        f1, f2 = min(n1_frame, n2_frame), max(n1_frame, n2_frame)
+        r1, r2 = query_frame - f1, f2 - query_frame
+        r1, r2 = r1 / (r1 + r2), r2 / (r1 + r2)
+        return int(round(r1 * timing_dict[f2] + r2 * timing_dict[f1]))
+    elif n1_frame < 0 and n2_frame >= 0:
+        if n2_index - 1 < 0:
+            raise IndexError('negative n2_index value')
+        f1, f2 = sorted_frames[n2_index - 1], n2_frame
+        dv = (timing_dict[f2] - timing_dict[f1]) / (f2 - f1)
+        dd = query_frame - f2
+        return int(round(timing_dict[f2] + dd * dv))
+    elif n2_frame < 0 and n1_frame >= 0:
+        if n1_index + 1 >= len(sorted_frames):
+            raise IndexError('too large n1_index value {}, {}, {}'.format(query, n1_index, len(sorted_frames)))
+        f1, f2 = n1_frame, sorted_frames[n1_index + 1]
+        dv = (timing_dict[f2] - timing_dict[f1]) / (f2 - f1)
+        dd = f1 - query_frame
+        return int(round(timing_dict[f1] - dd * dv))
+    else:
+        raise ValueError('could not find any neighboring frames')
+
+
+def interpolate_frame_by_timing(query_timing: int, frame_by_timing: Dict[int, int], sorted_timings: List[int]) -> int:
+    if query_timing in frame_by_timing:
+        return frame_by_timing[query_timing]
+
+    index1, timing1, dist1 = -1, -1, 1e20
+    index2, timing2, dist2 = -1, -1, 1e20
+    for i, timing in enumerate(sorted_timings):
+        dist = abs(query_timing - timing)
+        if query_timing <= timing:
+            if dist < dist1:
+                dist1 = dist
+                index1 = i
+                timing1 = timing
+        else:
+            if dist < dist2:
+                dist2 = dist
+                index2 = i
+                timing2 = timing
+
+    if timing1 >= 0 and timing2 >= 0:
+        t1, t2 = min(timing1, timing2), max(timing1, timing2)
+        r1, r2 = query_timing - t1, t2 - query_timing
+        r1, r2 = r1 / (r1 + r2), r2 / (r1 + r2)
+        return int(round(r1 * frame_by_timing[t2] + r2 * frame_by_timing[t1]))
+    elif timing1 < 0 and timing2 >= 0:
+        return frame_by_timing[timing2]
+        # if index2 - 1 < 0:
+        #     raise IndexError('negative n2_index value')
+        # t1, t2 = sorted_timings[index2 - 1], timing2
+        # dv = (frame_by_timing[t2] - frame_by_timing[t1]) / (t2 - t1)
+        # dd = query_timing - t2
+        # return int(round(frame_by_timing[t2] + dd * dv))
+    elif timing2 < 0 and timing1 >= 0:
+        return frame_by_timing[timing1]
+        # if index1 + 1 >= len(sorted_timings):
+        #     raise IndexError('too large n1_index value {}, {}, {}'.format(query_timing, index1, len(sorted_timings)))
+        # t1, t2 = timing1, sorted_timings[index1 + 1]
+        # dv = (frame_by_timing[t2] - frame_by_timing[t1]) / (t2 - t1)
+        # dd = t1 - query_timing
+        # return int(round(frame_by_timing[t1] - dd * dv))
+    else:
+        raise ValueError('could not find any neighboring frames')
+
+
+def test_post_process(root_dir: Path, traj_index: int):
+    timing_path = root_dir / 'audios/timing{:02d}.json'.format(traj_index)
+    audio_path = sorted((root_dir / 'audios').glob('*.wav'))[traj_index]
+    state_path = root_dir / 'states/traj{:02d}.json'.format(traj_index)
+    tmp_video_path = root_dir / 'tmp{:02d}.mp4'.format(traj_index)
+    out_audio_path = root_dir / 'audio{:02d}.wav'.format(traj_index)
+    out_video_path = root_dir / 'video{:02d}.mp4'.format(traj_index)
+
+    def image_path_func(frame: int):
+        return root_dir / 'images/{:08d}e.png'.format(frame)
+
+    # read audio
+    audio_read = wave.open(str(audio_path), 'rb')
+    audio_data = audio_read.readframes(audio_read.getnframes())
+
+    # read state
+    with open(str(state_path), 'r') as file:
+        state_dict = json.load(file)
+    frame_range = state_dict['frame_range']
+    sentence_dict = {i: s for i, s in zip(range(*frame_range), state_dict['sentences'])}
+    subgoal_dict = {i: s for i, s in zip(range(*frame_range), map(itemgetter(1), state_dict['stop_frames']))}
+
+    # read timing dict and prune with images
+    def get_frame_from_image_path(image_path):
+        return int(image_path.stem[:-1])
+
+    frame_from_images = [get_frame_from_image_path(p) for p in sorted((root_dir / 'images').glob('*e.png'))]
+    with open(str(timing_path), 'r') as file:
+        raw_timing_dict = json.load(file)
+    timing_dict = dict()
+    for k, v in raw_timing_dict.items():
+        if int(k) in frame_from_images:
+            timing_dict[int(k)] = v
+    # timing_dict = {int(k): v for k, v in timing_dict.items()}
+    frame_by_timing = {v: k for k, v in timing_dict.items()}
+    sorted_frames = sorted(timing_dict.keys())
+    sorted_timings = sorted(frame_by_timing.keys())
+    interpolate = partial(
+        interpolate_frame_by_timing, frame_by_timing=frame_by_timing, sorted_timings=sorted_timings)
+
+    # compute the common starting timestamp
+    audio_start_ts = int(audio_path.stem)
+    image_start_ts = sorted_timings[0]
+    state_start_ts = interpolate_timing_by_frame(frame_range[0], timing_dict, sorted_frames)
+    start_ts = max(audio_start_ts, image_start_ts, state_start_ts)
+    end_ts = interpolate_timing_by_frame(frame_range[1], timing_dict, sorted_frames)
+
+    print(audio_start_ts)
+    print(image_start_ts)
+    print(state_start_ts)
+    print(start_ts, end_ts)
+
+    # cut the audio
+    diff_audio_ts = start_ts - audio_start_ts
+    diff_audio_len = int(round(diff_audio_ts / 1e3 * SAMPLE_WIDTH * SAMPLE_RATE))
+    audio_data = audio_data[diff_audio_len:]
+
+    duration_audio = len(audio_data) / (SAMPLE_WIDTH * SAMPLE_RATE)
+    duration_image = (sorted_timings[-1] - start_ts) / 1e3
+    duration_state = (end_ts - start_ts) / 1e3
+    print(duration_audio)
+    print(duration_image)
+    print(duration_state)
+    duration = min(duration_audio, duration_image, duration_state)
+    num_frames = int(round(duration * TARGET_FPS))
+    timestamps = [int(round(start_ts + i * 1e3 / TARGET_FPS)) for i in range(num_frames)]
+    print(duration, num_frames)
+    print(timestamps[0], timestamps[-1])
+    image_frames = [interpolate(ts) for ts in timestamps]
+    print(image_frames[0], image_frames[-1])
+
+    image_path_list = [image_path_func(f) for f in image_frames]
+    for p, f in zip(image_path_list, image_frames):
+        if not p.exists():
+            print(p, f)
+    assert all(p.exists() for p in image_path_list)
+    image_path_set = set(image_path_list)
+
+    image_dict = {get_frame_from_image_path(p): Image.open(p) for p in image_path_set}
+    images = [image_dict[f] for f in image_frames]
+    sentences = [sentence_dict[f] for f in image_frames]
+    subgoals = [subgoal_dict[f] for f in image_frames]
+
+    font = ImageFont.truetype('Roboto-Bold.ttf', 30)#15)
+
+    def draw(image, font, text, pos, color):
+        ImageDraw.Draw(image).text(pos, text, fill='rgb({}, {}, {})'.format(color[2], color[1], color[0]), font=font)
+
+    for i, (image, sentence, subgoal) in enumerate(zip(images, sentences, subgoals)):
+        size = np.array(image.size) * 2
+        image = image.resize(size.astype(int), Image.ANTIALIAS)
+        draw(image, font, 'sentence: {}'.format(sentence), (60, 320), (255, 255, 255))  # 30, 160
+        draw(image, font, 'sub-task: {}'.format(subgoal), (60, 360), (0, 255, 255))  # 30, 180
+        size = np.array(image.size) / 2
+        image = image.resize(size.astype(int), Image.ANTIALIAS)
+        images[i] = image
+    images = [np.array(i) for i in images]
+
+    # for i, (image, sentence, subgoal) in enumerate(zip(image_list, sentence_list, subgoal_list)):
+    #     draw(image, font, sentence, (30, 30), (255, 255, 255))
+    #     draw(image, font, subgoal, (30, 60), (0, 255, 255))
+    # image_list = [np.array(i) for i in image_list]
+    # strs = [' '.join([s1, s2]) for s1, s2 in zip(sentences, subgoals)]
+    # print(len(images), len(sentences), duration)
+    video_from_memory(images, out_video_path, framerate=TARGET_FPS, revert=False)
+
+    # cut out the audio again
+    audio_frames = int(round(duration * SAMPLE_WIDTH * SAMPLE_RATE))
+    audio_data = audio_data[:audio_frames]
+    duration_audio = len(audio_data) / (SAMPLE_WIDTH * SAMPLE_RATE)
+    save_audio(out_audio_path, audio_data)
+
+    # merge the audio to the video
+    # if out_video_path.exists():
+    #     out_video_path.unlink()
+    cmd = ['ffmpeg', '-y', '-i', str(out_video_path), '-c:v', 'libx264', str(tmp_video_path)]
+    run(cmd)
+
+    video_clip = editor.VideoFileClip(str(tmp_video_path))
+    audio_clip = editor.AudioFileClip(str(out_audio_path))
+    video_clip = video_clip.set_audio(audio_clip)
+    video_clip.write_videofile(str(out_video_path))
+    logger.info('wrote a video file {}'.format(out_video_path))
+
+
+
+    # cmd = ['ffmpeg', '-y', '-i', str(tmp_video_path), '-i', str(out_audio_path),
+    #        '-c:v', 'copy', '-c:a', 'copy', '-shortest', str(out_video_path)]
+    # run(cmd)
+    # if out_video_path.exists():
+    #     tmp_video_path.unlink()
+
+    # t1 = sorted_timings[0] - 500
+    # t2 = sorted_timings[-1] + 500
+    # for query_timing in range(t1, t2, 100):
+    #     interp_frame =
+    #     print(query_timing, interp_frame)
+
+    # for i, query_frame in enumerate(range(1050, 1200)):
+    #     value = interpolate_timing_by_frame(query_frame, timing_dict, sorted_frames)
+    #     print(i, value, query_frame, sorted_frames[0], sorted_frames[-1])
+    #     if query_frame in timing_dict:
+    #         print(i, query_frame, timing_dict[query_frame])
+
+    # values = []
+    # for i, (v1, v2) in enumerate(zip(values[:-1], values[1:])):
+    #     print(i, v2 - v1)
+
+    # audio_read = wave.open(str(audio_path), 'rb')
+    # audio_data = audio_read.readframes(audio_read.getnframes())
+    # audio_start_ts = int(audio_path.stem)
+    #
+
+
+    # print(type(audio_data), len(audio_data), audio_start_ts, image_start_ts)
+
+    # '1569878996762'
+    # '1569878992313'
+
 
 if __name__ == '__main__':
-    main()
+    root_dir = Path.home() / 'projects/language-grounded-driving/.carla/evaluations/exp40/ls-town2/step072500/online'
+    traj_index = 0
+    test_post_process(root_dir, traj_index)
+    # main()

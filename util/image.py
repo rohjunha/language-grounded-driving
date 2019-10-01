@@ -9,6 +9,7 @@ import imageio
 import numpy as np
 import torch
 from PIL import ImageEnhance, Image
+from imageio_ffmpeg import write_frames
 from torchvision.transforms import Normalize, ToTensor, Compose, ToPILImage
 
 
@@ -71,9 +72,10 @@ def video_from_memory(
         revert: bool = True):
     kargs = {
         'quality': 10,
-        'macro_block_size': None,
+        'codec': 'libx264',
+        # 'macro_block_size': None,
         'fps': framerate,
-        'ffmpeg_log_level': 'panic'}
+        'ffmpeg_log_level': 'panic',}
     if texts and len(texts) == len(images):
         for image, text in zip(images, texts):
             lines = text.splitlines()
@@ -81,6 +83,12 @@ def video_from_memory(
                 put_text(image, line, (12, 12 + 10 * i), (255, 255, 255), 0.3)
     if revert:
         images = [image[:, :, ::-1] for image in images]
+    # size = (images[0].shape[1], images[0].shape[0])
+    # writer = write_frames(str(output_path), size, fps=framerate, quality=10, ffmpeg_log_level='panic')
+    # writer.send(None)
+    # for image in images:
+    #     writer.send(image)
+    # writer.close()
     imageio.mimwrite(str(output_path), images, 'mp4', **kargs)
 
 
