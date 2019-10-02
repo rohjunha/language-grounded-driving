@@ -9,6 +9,7 @@ import argparse
 import json
 import shutil
 import wave
+from copy import deepcopy
 from functools import partial
 from multiprocessing import Queue, Process, Event
 from operator import attrgetter, itemgetter
@@ -23,7 +24,7 @@ import pyaudio
 from moviepy import editor
 from six.moves import queue
 
-from data.types import DriveDataFrame
+from data.types import DriveDataFrame, LengthComputer
 from environment import set_world_asynchronous, set_world_synchronous, GameEnvironment
 from evaluator import ExperimentArgument, load_param_and_evaluator, load_evaluation_dataset, \
     get_random_sentence_from_keyword, listen_keyboard
@@ -80,29 +81,74 @@ from multiprocessing import Manager
 TARGET_FPS = 15
 
 
-def save_audio(audio_path, in_data):
+def save_audio(audio_path, audio_data):
     waveFile = wave.open(str(audio_path), 'wb')
     waveFile.setnchannels(1)
     waveFile.setsampwidth(SAMPLE_WIDTH)
     waveFile.setframerate(SAMPLE_RATE)
-    waveFile.writeframes(in_data)
+    waveFile.writeframes(audio_data)
     waveFile.close()
 
 
-def post_process(root_dir: Path, traj_index: int):
+class AudioManager:
+    def __init__(self, directory: EvaluationDirectory):
+        self.directory = directory
+
+    def load_audio_info(self) -> Dict[int, int]:
+        if self.directory.audio_info_path.exists():
+            with open(str(self.directory.audio_info_path), 'r') as file:
+                info = json.load(file)
+        else:
+            info = dict()
+        info = {int(k): int(v) for k, v in info.items()}
+        return info
+
+    def save_audio_info(self, info: Dict[int, int]):
+        with open(str(self.directory.audio_info_path), 'w') as file:
+            json.dump(info, file, indent=4)
+
+    def save_audio_with_timing(self, audio_data, timing: int, traj_index: int):
+        info = self.load_audio_info()
+        info[traj_index] = timing
+        save_audio(self.directory.audio_path(timing), audio_data)
+        self.save_audio_info(info)
+
+    def save_audio(self, audio_path, audio_data):
+        save_audio(audio_path, audio_data)
+
+    def load_audio_with_timing(self, traj_index: int):
+        info = self.load_audio_info()
+        if traj_index not in info:
+            raise IndexError('invalid trajectory index {}'.format(traj_index))
+        timing = info[traj_index]
+        audio_path = self.directory.audio_path(timing)
+        if not audio_path.exists():
+            raise FileNotFoundError('could not find audio file {}'.format(audio_path))
+        audio_read = wave.open(str(audio_path), 'rb')
+        audio_data = audio_read.readframes(audio_read.getnframes())
+        return audio_data, timing
+
+
+def generate_video_with_audio(directory: EvaluationDirectory, traj_index: int):
+    root_dir = directory.root_dir
     timing_path = root_dir / 'audios/timing{:02d}.json'.format(traj_index)
-    audio_path = sorted((root_dir / 'audios').glob('*.wav'))[traj_index]
     state_path = root_dir / 'states/traj{:02d}.json'.format(traj_index)
     tmp_video_path = root_dir / 'tmp{:02d}.mp4'.format(traj_index)
     out_audio_path = root_dir / 'audio{:02d}.wav'.format(traj_index)
     out_video_path = root_dir / 'video{:02d}.mp4'.format(traj_index)
+    audio_manager = AudioManager(directory)
+
+    if out_video_path.exists():
+        return True
+
+    if not state_path.exists():
+        return False
 
     def image_path_func(frame: int):
         return root_dir / 'images/{:08d}e.png'.format(frame)
 
     # read audio
-    audio_read = wave.open(str(audio_path), 'rb')
-    audio_data = audio_read.readframes(audio_read.getnframes())
+    audio_data, audio_start_ts = audio_manager.load_audio_with_timing(traj_index)
 
     # read state
     with open(str(state_path), 'r') as file:
@@ -129,7 +175,6 @@ def post_process(root_dir: Path, traj_index: int):
         interpolate_frame_by_timing, frame_by_timing=frame_by_timing, sorted_timings=sorted_timings)
 
     # compute the common starting timestamp
-    audio_start_ts = int(audio_path.stem)
     image_start_ts = sorted_timings[0]
     state_start_ts = interpolate_timing_by_frame(frame_range[0], timing_dict, sorted_frames)
     start_ts = max(audio_start_ts, image_start_ts, state_start_ts)
@@ -155,8 +200,19 @@ def post_process(root_dir: Path, traj_index: int):
             print(p, f)
     assert all(p.exists() for p in image_path_list)
     image_path_set = set(image_path_list)
-
-    image_dict = {get_frame_from_image_path(p): Image.open(p) for p in image_path_set}
+    image_dict = dict()
+    last_value = None
+    for p in image_path_set:
+        key = get_frame_from_image_path(p)
+        try:
+            value = Image.open(p)
+            if value is not None:
+                last_value = value
+        except:
+            if last_value is not None:
+                image_dict[key] = last_value
+            continue
+        image_dict[key] = value
     images = [image_dict[f] for f in image_frames]
     sentences = [sentence_dict[f] for f in image_frames]
     subgoals = [subgoal_dict[f] for f in image_frames]
@@ -198,12 +254,13 @@ def post_process(root_dir: Path, traj_index: int):
     logger.info('write the final video file {}'.format(out_video_path))
     if out_video_path.exists() and tmp_video_path.exists():
         tmp_video_path.unlink()
+    return True
 
 
 class ResumableMicrophoneStream:
     """Opens a recording stream as a generator yielding the audio chunks."""
 
-    def __init__(self, rate, chunk_size, audio_path_func, audio_queue, event):
+    def __init__(self, rate, chunk_size, audio_path_func, audio_queue, event, traj_index):
         self._rate = rate
         self.chunk_size = chunk_size
         self._num_channels = 1
@@ -233,7 +290,8 @@ class ResumableMicrophoneStream:
         )
         self.audio_path_func = audio_path_func
         self.event = event
-        self.audio_with_timing = audio_queue
+        self.audio_queue = audio_queue
+        self.traj_index = traj_index
 
     def __enter__(self):
         self.closed = False
@@ -249,18 +307,13 @@ class ResumableMicrophoneStream:
         self._audio_interface.terminate()
         self.event.set()
 
-    def _save_audio(self, timestamp, in_data):
-        # timestamp = get_current_time()
-        waveFile = wave.open(str(self.audio_path_func(timestamp)), 'wb')
-        waveFile.setnchannels(self._num_channels)
-        waveFile.setsampwidth(self._audio_interface.get_sample_size(pyaudio.paInt16))
-        waveFile.setframerate(self._rate)
-        waveFile.writeframes(in_data)
-        waveFile.close()
-
     def _fill_buffer(self, in_data, *args, **kwargs):
         """Continuously collect data from the audio stream, into the buffer."""
-        self.audio_with_timing.put((get_current_time(), in_data))
+        self.audio_queue.put({
+            'timestamp': get_current_time(),
+            'traj_index': self.traj_index,
+            'data': in_data,
+        })
         self._buff.put(in_data)
         return None, pyaudio.paContinue
 
@@ -369,8 +422,8 @@ def listen_print_loop(responses, stream, queue):
 
             sys.stdout.write(GREEN)
             sys.stdout.write('\033[K')
-            sys.stdout.write(str(corrected_time) + ': ' + transcript + '\n')
-            queue.put(transcript)
+            sys.stdout.write(str(corrected_time) + ': ' + transcript.strip() + '\n')
+            queue.put(transcript.strip())
 
             stream.is_final_end_time = stream.result_end_time
             stream.last_transcript_was_final = True
@@ -391,125 +444,8 @@ def listen_print_loop(responses, stream, queue):
             stream.last_transcript_was_final = False
 
 
-def generate_video_with_audio(data):
-    root_dir, traj_index = data
-    # root_dir = Path.home() / 'projects/language-grounded-driving/.carla/evaluations/exp40/ls-town2/step072500/online'
-    # traj_index = 0
-    video_dir = root_dir / 'videos'
-    audio_dir = root_dir / 'audios'
-    state_dir = root_dir / 'states'
-    image_dir = root_dir / 'images'
-    timing_path = audio_dir / 'timing{:02d}.json'.format(traj_index)
-    state_path = state_dir / 'traj{:02d}.json'.format(traj_index)
-    out_vid_path = video_dir / 'traj{:02d}r.mp4'.format(traj_index)
-
-    def image_path_func(frame: int):
-        return image_dir / '{:08d}e.png'.format(frame)
-
-    def generate_text_clips(state_path: Path, frame_timing_dict):
-        def fetch_sequences_online(seq_path: Path):
-            with open(str(seq_path), 'r') as file:
-                data = json.load(file)
-            xs, ys = zip(*list(map(lambda x: tuple([float(v) for v in x.split(',')[:2]]), data['data_frames'])))
-            frame_range = data['frame_range']
-            sentences = data['sentences']
-            subgoals = list(map(itemgetter(1), data['stop_frames']))
-            return xs, ys, frame_range, sentences, subgoals
-
-        xs, ys, frame_range, sentences, subgoals = fetch_sequences_online(state_path)
-        sentence_index_list = unique_with_islices(sentences)
-        subtask_index_list = unique_with_islices(subgoals)
-
-        def _generate_text_clips(text_index_list, prefix, fontsize, pos, color='white'):
-            clips = []
-            for sentence, local_frame_range in text_index_list:
-                local_frame_range = [v + frame_range[0] for v in local_frame_range]
-                start_time, end_time = None, None
-                for frame in range(*local_frame_range):
-                    if frame not in frame_timing_dict:
-                        continue
-                    timing = frame_timing_dict[frame]
-                    if start_time is None or timing < start_time:
-                        start_time = timing
-                    if end_time is None or timing > end_time:
-                        end_time = timing
-                if start_time is None or end_time is None or start_time > end_time:
-                    print('failed to find proper timing from {}, {}'.format(sentence, local_frame_range))
-                text_clip = editor.TextClip(
-                    prefix + sentence + ' ', fontsize=fontsize, color=color, bg_color='black', font='Lato-Medium')
-                text_clip = text_clip.set_start(start_time, False).set_end(end_time)
-                text_clip = text_clip.set_position(pos)
-                clips.append(text_clip)
-            return clips
-
-        clips = _generate_text_clips(sentence_index_list, ' sentence: ', 27, (30, 360)) + \
-                _generate_text_clips(subtask_index_list, ' sub-task : ', 27, (30, 393), 'yellow')
-        return clips
-
-    with open(str(timing_path), 'r') as file:
-        data = json.load(file)
-    frame_timing_dict = {int(key): data[key] for key in data.keys()}
-    frame_list = sorted(frame_timing_dict.keys())
-    frame_list = list(filter(lambda x: image_path_func(x).exists(), frame_list))
-    raw_timing_list = [frame_timing_dict[f] for f in frame_list]
-    t1, t2 = raw_timing_list[0], raw_timing_list[-1]
-
-    audio_file_list = sorted(audio_dir.glob('*.wav'))
-    audio_file_list = list(filter(lambda x: t1 < int(x.stem) < t2, audio_file_list))
-    audio_timing_list = list(map(lambda x: int(x.stem), audio_file_list))
-    print(audio_timing_list[0], audio_timing_list[-1])
-
-    timing_offset = frame_timing_dict[frame_list[0]]
-    image_timing_list = [(frame_timing_dict[f] - timing_offset) / 1e3 for f in frame_list]
-    audio_timing_list = [(t - timing_offset) / 1e3 for t in audio_timing_list]
-    for key in frame_timing_dict.keys():
-        frame_timing_dict[key] = (frame_timing_dict[key] - timing_offset) / 1e3
-
-    image_duration_list = [t2 - t1 for t1, t2 in zip(image_timing_list[:-1], image_timing_list[1:])]
-    image_duration_list.append(image_duration_list[-1])
-    image_clip_list = []
-    for frame, image_timing, image_duration in zip(frame_list, image_timing_list, image_duration_list):
-        clip = editor.ImageClip(str(image_path_func(frame)))
-        clip = clip.set_duration(image_duration)
-        clip = clip.set_start(image_timing, True)
-        image_clip_list.append(clip)
-    audio_clip_list = []
-    for audio_file, audio_timing in zip(audio_file_list, audio_timing_list):
-        try:
-            clip = editor.AudioFileClip(str(audio_file))
-            clip = clip.set_start(audio_timing, True)
-            audio_clip_list.append(clip)
-        except:
-            print('failed in {}'.format(audio_file))
-            continue
-
-    text_clips = generate_text_clips(state_path, frame_timing_dict)
-    cvc = editor.CompositeVideoClip(image_clip_list + text_clips)
-    cac = editor.CompositeAudioClip(audio_clip_list)
-    cvc = cvc.set_fps(30)
-    cvc = cvc.set_audio(cac)
-    cvc.write_videofile(str(out_vid_path))
-    logger.info('wrote a video file {}'.format(out_vid_path))
-
-
-def generate_video_from_clips(queue, event):
-    while not event.is_set():
-        if not queue.empty():
-            data_tuple = queue.get()
-            if data_tuple is None:
-                break
-            generate_video_with_audio(data_tuple)
-            # cvc = editor.CompositeVideoClip(data_dict['video'] + data_dict['text'])
-            # cvc = cvc.set_fps(30)
-            # cac = editor.CompositeAudioClip(data_dict['audio'])
-            # cvc = cvc.set_audio(cac)
-            # cvc.write_videofile(str(data_dict['path']))
-            # logger.info('write video file {}'.format(data_dict['path']))
-    event.set()
-
-
-def launch_recognizer(queue, event, audio_path_func, audio_queue, audio_setup_dict):
-    mic_manager = ResumableMicrophoneStream(SAMPLE_RATE, CHUNK_SIZE, audio_path_func, audio_queue, event)
+def launch_recognizer(language_queue, event, audio_path_func, audio_queue, audio_setup_dict, traj_index):
+    mic_manager = ResumableMicrophoneStream(SAMPLE_RATE, CHUNK_SIZE, audio_path_func, audio_queue, event, traj_index)
     audio_setup_dict['setnchannels'] = mic_manager._num_channels
     audio_setup_dict['setsampwidth'] = mic_manager._audio_interface.get_sample_size(pyaudio.paInt16)
     audio_setup_dict['setframerate'] = mic_manager._rate
@@ -545,7 +481,7 @@ def launch_recognizer(queue, event, audio_path_func, audio_queue, audio_setup_di
                                                    requests)
 
             # Now, put the transcription responses to use.
-            listen_print_loop(responses, stream, queue)
+            listen_print_loop(responses, stream, language_queue)
 
             if stream.result_end_time > 0:
                 stream.final_request_end_time = stream.is_final_end_time
@@ -560,23 +496,16 @@ def launch_recognizer(queue, event, audio_path_func, audio_queue, audio_setup_di
             stream.new_stream = True
     event.set()
 
-    # for timestamp, audio in mic_manager.audio_with_timing.items():
-    #     waveFile = wave.open(str(audio_path_func(timestamp)), 'wb')
-    #     waveFile.setnchannels(mic_manager._num_channels)
-    #     waveFile.setsampwidth(mic_manager._audio_interface.get_sample_size(pyaudio.paInt16))
-    #     waveFile.setframerate(mic_manager._rate)
-    #     waveFile.writeframes(audio)
-    #     waveFile.close()
-
 
 class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
-    def __init__(self, eval_keyword: str, language_queue, event, audio_queue, audio_setup_dict, args):
+    def __init__(self, eval_keyword: str, language_queue, event, audio_queue, audio_setup_dict, traj_index, args):
         self.eval_keyword = eval_keyword
         args.show_game = True
         GameEnvironment.__init__(self, args=args, agent_type='evaluation')
 
         self.event = event
         self.language_queue = language_queue
+        self.traj_index = traj_index
 
         # load params and evaluators
         self.eval_name = args.eval_name
@@ -713,6 +642,7 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
         sleep(0.5)
         set_world_synchronous(self.world)
 
+        agent_len = LengthComputer()
         stop_buffer = []
         while not status['exited'] or not status['collided']:
             keyboard_input = listen_keyboard()
@@ -721,13 +651,17 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
                 self.event.set()
                 logger.info('event was triggered')
                 break
+            elif keyboard_input == 'r':
+                status['restart'] = True
+                return status
 
             if not self.language_queue.empty():
                 self.sentence = self.language_queue.get()
+                logger.info('sentence was updated: {}'.format(self.sentence))
                 if self.sentence is None:
                     status['finished'] = True
                     break
-                keyword = 'left,right'
+                keyword = 'left'
                 self.eval_keyword = keyword
                 self.control_param.eval_keyword = keyword
                 self.stop_param.eval_keyword = keyword
@@ -745,6 +679,11 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
                 logger.info('collision was detected at frame #{}'.format(frame))
                 status['collided'] = True
                 break
+
+            if count > 50 and agent_len.length < 0.5:
+                logger.info('simulation has a problem in going forward')
+                status['restart'] = True
+                return status
 
             clock.tick()
             self.world.tick()
@@ -768,18 +707,19 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
             # run high-level evaluator when stopped was triggered by the low-level controller
             final_image = self.final_image
             if status['stopped']:
-                action = self.high_evaluator.run_step(final_image, self.sentence)
+                sentence = deepcopy(self.sentence)
+                action = self.high_evaluator.run_step(final_image, sentence)
                 action = self.softmax(action)
                 action_index = torch.argmax(action[-1], dim=0).item()
                 location = self.agent.fetch_car_state().transform.location
                 self.high_data_dict[t].append((final_image, {
-                    'sentence': self.sentence,
+                    'sentence': sentence,
                     'location': (location.x, location.y),
                     'action_index': action_index}))
                 sub_task = HIGH_LEVEL_COMMAND_NAMES[action_index]
-                if self.last_sub_task != sub_task:
-                    self.last_sub_task = sub_task
-                    logger.info('sub-task {} was triggered'.format(self.last_sub_task))
+                # if self.last_sub_task != sub_task:
+                self.last_sub_task = sub_task
+                logger.info('sentence: {}, sub-task: {}'.format(sentence, self.last_sub_task))
                 if action_index < 4:
                     self.control_evaluator.cmd = action_index
                     self.stop_evaluator.cmd = action_index
@@ -800,6 +740,7 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
                 self.agent.step_from_control(frame, control)
                 self.agent.save_stop(frame, stop, sub_goal)
                 self.agent.save_cmd(frame, self.sentence)
+                agent_len(self.agent.data_frame_dict[self.agent.data_frame_number].state.transform.location)
                 stop_buffer.append(stop)
                 recent_buffer = stop_buffer[-3:]
                 status['stopped'] = len(recent_buffer) > 2 and sum(list(map(lambda x: x > 0.0, recent_buffer))) > 1
@@ -811,7 +752,11 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
 
             count += 1
 
-        self.audio_queue.put((get_current_time(), None))
+        self.audio_queue.put({
+            'timestamp': get_current_time(),
+            'data': None,
+            'traj_index': t,
+        })
         logger.info('saving information')
         curr_eval_data = self.agent.export_eval_data(status['collided'], self.sentence)
         if curr_eval_data is not None:
@@ -836,6 +781,7 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
                     if t in old_indices:
                         t += 1
                         continue
+                    self.traj_index = t
                     transform = self.eval_transforms[t]
                     run_status = self.run_single_trajectory(t, transform)
                     if run_status['exited']:
@@ -943,15 +889,20 @@ def interpolate_frame_by_timing(query_timing: int, frame_by_timing: Dict[int, in
         raise ValueError('could not find any neighboring frames')
 
 
-def saver(directory: EvaluationDirectory, audio_queue, event):
+def audio_saver(directory: EvaluationDirectory, audio_queue: Queue, video_queue: Queue, event: Event):
     audio_start_ts = -1
     audio_list = []
+    audio_manager = AudioManager(directory)
     while not event.is_set():
         if not audio_queue.empty():
-            timestamp, audio_data = audio_queue.get()
+            data_dict = audio_queue.get()
+            timestamp = data_dict['timestamp']
+            audio_data = data_dict['data']
+            traj_index = data_dict['traj_index']
             if audio_data is None:
                 final_audio_data = b''.join(audio_list)
-                save_audio(directory.audio_path(audio_start_ts), final_audio_data)
+                audio_manager.save_audio_with_timing(final_audio_data, audio_start_ts, traj_index)
+                video_queue.put(traj_index)
                 audio_start_ts = -1
                 audio_list = []
             else:
@@ -959,10 +910,61 @@ def saver(directory: EvaluationDirectory, audio_queue, event):
             if audio_start_ts < 0:
                 audio_start_ts = timestamp
     event.set()
+    video_queue.put(None)
 
-    num_traj = len(list(directory.audio_dir.glob('*.wav')))
-    for t in range(num_traj):
-        post_process(directory.root_dir, t)
+
+def video_saver(directory: EvaluationDirectory, video_queue: Queue, event: Event):
+    max_trial = 3
+    while not event.is_set():
+        if not video_queue.empty():
+            traj_index = video_queue.get()
+            if traj_index is None:
+                event.set()
+                break
+            generated = False
+            count = 0
+            while not generated and count < max_trial:
+                generated = generate_video_with_audio(directory, traj_index)
+                count += 1
+    event.set()
+
+
+def prepare_model(info_dict: dict):
+    index, name, step = info_dict['index'], info_dict['name'], info_dict['step']
+    rel_checkpoint_dir = '.carla/checkpoints/exp{}/{}'.format(index, name)
+    rel_param_dir = '.carla/params/exp{}'.format(index)
+    checkpoint_pth_name = 'step{:06d}.pth'.format(step)
+    checkpoint_json_name = 'step{:06d}.json'.format(step)
+    param_name = '{}.json'.format(name)
+    model_dir = Path.cwd() / rel_checkpoint_dir
+    param_dir = Path.cwd() / rel_param_dir
+    if not model_dir.exists():
+        mkdir_if_not_exists(model_dir)
+    if not param_dir.exists():
+        mkdir_if_not_exists(param_dir)
+    checkpoint_model_path = Path.cwd() / '{}/{}'.format(rel_checkpoint_dir, checkpoint_pth_name)
+    checkpoint_json_path = Path.cwd() / '{}/{}'.format(rel_checkpoint_dir, checkpoint_json_name)
+    param_path = Path.cwd() / '{}/{}'.format(rel_param_dir, param_name)
+
+    error_messages = []
+    if not checkpoint_model_path.exists() or not checkpoint_json_path.exists() or not param_path.exists():
+        servers = ['dgx:/raid/rohjunha', 'grta:/home/rohjunha']
+        from subprocess import run
+        for server in servers:
+            try:
+                run(['scp', '{}/{}/{}'.format(server, rel_checkpoint_dir, checkpoint_pth_name),
+                     checkpoint_model_path])
+                run(['scp', '{}/{}/{}'.format(server, rel_checkpoint_dir, checkpoint_json_name),
+                     checkpoint_json_path])
+                run(['scp', '{}/{}/{}'.format(server, rel_param_dir, param_name), param_path])
+            except:
+                error_messages.append('file not found in {}'.format(server))
+            finally:
+                pass
+
+    if not checkpoint_model_path.exists() or not checkpoint_json_path.exists() or not param_path.exists():
+        logger.error(error_messages)
+        raise FileNotFoundError('failed to fetch files from other servers')
 
 
 def main():
@@ -979,43 +981,6 @@ def main():
     with open(str(conf_path), 'r') as file:
         data = json.load(file)
 
-    def prepare_model(info_dict: dict):
-        index, name, step = info_dict['index'], info_dict['name'], info_dict['step']
-        rel_checkpoint_dir = '.carla/checkpoints/exp{}/{}'.format(index, name)
-        rel_param_dir = '.carla/params/exp{}'.format(index)
-        checkpoint_pth_name = 'step{:06d}.pth'.format(step)
-        checkpoint_json_name = 'step{:06d}.json'.format(step)
-        param_name = '{}.json'.format(name)
-        model_dir = Path.cwd() / rel_checkpoint_dir
-        param_dir = Path.cwd() / rel_param_dir
-        if not model_dir.exists():
-            mkdir_if_not_exists(model_dir)
-        if not param_dir.exists():
-            mkdir_if_not_exists(param_dir)
-        checkpoint_model_path = Path.cwd() / '{}/{}'.format(rel_checkpoint_dir, checkpoint_pth_name)
-        checkpoint_json_path = Path.cwd() / '{}/{}'.format(rel_checkpoint_dir, checkpoint_json_name)
-        param_path = Path.cwd() / '{}/{}'.format(rel_param_dir, param_name)
-
-        error_messages = []
-        if not checkpoint_model_path.exists() or not checkpoint_json_path.exists() or not param_path.exists():
-            servers = ['dgx:/raid/rohjunha', 'grta:/home/rohjunha']
-            from subprocess import run
-            for server in servers:
-                try:
-                    run(['scp', '{}/{}/{}'.format(server, rel_checkpoint_dir, checkpoint_pth_name),
-                         checkpoint_model_path])
-                    run(['scp', '{}/{}/{}'.format(server, rel_checkpoint_dir, checkpoint_json_name),
-                         checkpoint_json_path])
-                    run(['scp', '{}/{}/{}'.format(server, rel_param_dir, param_name), param_path])
-                except:
-                    error_messages.append('file not found in {}'.format(server))
-                finally:
-                    pass
-
-        if not checkpoint_model_path.exists() or not checkpoint_json_path.exists() or not param_path.exists():
-            logger.error(error_messages)
-            raise FileNotFoundError('failed to fetch files from other servers')
-
     model_keys = ['control', 'stop', 'high', 'single']
     for key in model_keys:
         if key in data:
@@ -1023,45 +988,58 @@ def main():
 
     args = ExperimentArgument(exp_name, data)
     param, evaluator = load_param_and_evaluator(eval_keyword='left,right', args=args, model_type='control')
-    dir = EvaluationDirectory(param.exp_index, args.eval_name, evaluator.step, 'online')
-    if dir.root_dir.exists():
-        [p.unlink() for p in dir.audio_dir.glob('*')]
-        [p.unlink() for p in dir.state_dir.glob('*')]
-        [p.unlink() for p in dir.image_dir.glob('*')]
-        [p.unlink() for p in dir.segment_dir.glob('*')]
+    directory = EvaluationDirectory(param.exp_index, args.eval_name, evaluator.step, 'online')
+    # if directory.root_dir.exists():
+    #     [p.unlink() for p in directory.audio_dir.glob('*')]
+    #     [p.unlink() for p in directory.state_dir.glob('*')]
+    #     [p.unlink() for p in directory.image_dir.glob('*')]
+    #     [p.unlink() for p in directory.segment_dir.glob('*')]
 
     language_queue = Queue()
     audio_queue = Queue()
+    video_queue = Queue()
     event = Event()
     manager = Manager()
+    traj_index = manager.Value('i', 0)
     audio_setup_dict = manager.dict()
+    audio_manager = AudioManager(directory)
 
-    try:
-        processes = [
-            Process(target=launch_recognizer, args=(language_queue, event, dir.audio_path, audio_queue, audio_setup_dict)),
-            Process(target=saver, args=(dir, audio_queue, event, )),
-        ]
-        for p in processes:
-            p.start()
-        for keyword in args.eval_keywords:
-            env = SpeechEvaluationEnvironment(keyword, language_queue, event, audio_queue, audio_setup_dict, args)
-            if not env.run():
-                event.set()
-                break
-        language_queue.put(None)
-        for p in processes:
-            p.join()
-    except:
-        logger.info('exception raised')
-    finally:
-        num_traj = len(list(dir.audio_dir.glob('*.wav')))
-        for t in range(num_traj):
-            if not (dir.root_dir / 'video{:02d}.mp4'.format(t)).exists():
-                post_process(dir.root_dir, t)
+    processes = [
+        Process(target=launch_recognizer,
+                args=(language_queue, event, directory.audio_path, audio_queue, audio_setup_dict, traj_index, )),
+        Process(target=audio_saver, args=(directory, audio_queue, video_queue, event,)),
+        Process(target=video_saver, args=(directory, video_queue, event, ),)
+    ]
+    for p in processes:
+        p.start()
+    for keyword in args.eval_keywords:
+        env = SpeechEvaluationEnvironment(
+            keyword, language_queue, event, audio_queue, audio_setup_dict, traj_index, args)
+        if not env.run():
+            event.set()
+            break
+    language_queue.put(None)
+    for p in processes:
+        p.join()
+    # except:
+    #     logger.info('exception raised')
+    # finally:
+    #     logger.info('finished the evaluation')
+
+    info = audio_manager.load_audio_info()
+    for traj_index in info.keys():
+        generate_video_with_audio(directory, traj_index)
 
 
 if __name__ == '__main__':
-    # root_dir = Path.home() / 'projects/language-grounded-driving/.carla/evaluations/exp40/ls-town2/step072500/online'
-    # traj_index = 3
-    # post_process(root_dir, traj_index)
-    main()
+    directory = EvaluationDirectory(40, 'ls-town2', 72500, 'online')
+    audio_manager = AudioManager(directory)
+    info = audio_manager.load_audio_info()
+    for traj_index in info.keys():
+        generate_video_with_audio(directory, traj_index)
+
+    # todo: update the way to count wav files
+    # todo: save the video during the gameplay
+    # todo: update the image and segment indices
+
+    # main()

@@ -207,6 +207,10 @@ class EvaluationDirectory:
     def audio_path(self, timestamp) -> Path:
         return self.audio_dir / '{}.wav'.format(timestamp)
 
+    @property
+    def audio_info_path(self) -> Path:
+        return self.audio_dir / 'info.json'
+
     def timing_path(self, traj_index: int) -> Path:
         return self.audio_dir / 'timing{:02d}.json'.format(traj_index)
 

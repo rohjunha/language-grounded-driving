@@ -76,9 +76,9 @@ class LowLevelEvaluator(CheckpointBase):
 
     def run_step(self, image: np.ndarray) -> Any:
         batch = self._prepare_batch(image)
-        output = self._run_step(batch)
+        model_output = self._run_step(batch)
         self.step_elapsed += 1
-        return output
+        return model_output
 
     @property
     def onehot_vector(self):
@@ -150,7 +150,6 @@ class HighLevelEvaluator(CheckpointBase):
     def _prepare_batch(self, image: np.ndarray, sentence: str):
         word_indices = [self.fetch_word_index(w) for w in sentence.lower().split(' ')]
         length = torch.tensor([len(word_indices)], dtype=torch.long)
-        logger.info((length.shape, sentence))
         word_indices = torch.tensor(word_indices, dtype=torch.long)
         self.images.append(_tensor_from_numpy_image(image))
         self.images = self.images[-10:]
