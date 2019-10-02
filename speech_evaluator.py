@@ -155,7 +155,7 @@ def generate_video_with_audio(directory: EvaluationDirectory, traj_index: int):
         state_dict = json.load(file)
     frame_range = state_dict['frame_range']
     sentence_dict = {i: s for i, s in zip(range(*frame_range), state_dict['sentences'])}
-    subgoal_dict = {i: s for i, s in zip(range(*frame_range), map(itemgetter(1), state_dict['stop_frames']))}
+    subtask_dict = {i: s for i, s in zip(range(*frame_range), map(itemgetter(1), state_dict['stop_frames']))}
 
     # read timing dict and prune with images
     def get_frame_from_image_path(image_path):
@@ -215,19 +215,33 @@ def generate_video_with_audio(directory: EvaluationDirectory, traj_index: int):
         image_dict[key] = value
     images = [image_dict[f] for f in image_frames]
     sentences = [sentence_dict[f] for f in image_frames]
-    subgoals = [subgoal_dict[f] for f in image_frames]
+    subtasks = [subtask_dict[f] for f in image_frames]
     logger.info('read {} images'.format(len(image_dict.keys())))
 
-    font = ImageFont.truetype('Roboto-Bold.ttf', 30)#15)
+    font_path = str(Path.cwd() / 'Roboto-Regular.ttf')
+    font = ImageFont.truetype(font_path, 30)
 
     def draw(image, font, text, pos, color):
-        ImageDraw.Draw(image).text(pos, text, fill='rgb({}, {}, {})'.format(color[2], color[1], color[0]), font=font)
+        draw = ImageDraw.Draw(image)
+        text_size = font.getsize(text)
+        xmargin, ymargin = 7, 5
+        pos1 = (pos[0] - xmargin, pos[1] - ymargin)
+        pos2 = (pos[0] + text_size[0] + xmargin, pos[1] + text_size[1] + ymargin)
+        fill = 'rgb({}, {}, {})'.format(color[2], color[1], color[0])
+        draw.rectangle([pos1, pos2], fill='rgb(0, 0, 0)')
+        draw.text(pos, text, fill=fill, font=font)
 
-    for i, (image, sentence, subgoal) in enumerate(zip(images, sentences, subgoals)):
+    labels = ['sentence', 'sub-task']
+    positions = [(50, 350), (50, 390)]
+    colors = [(255, 255, 255), (0, 255, 255)]
+    for i, (image, sentence, subtask) in enumerate(zip(images, sentences, subtasks)):
         size = np.array(image.size) * 2
         image = image.resize(size.astype(int), Image.ANTIALIAS)
-        draw(image, font, 'sentence: {}'.format(sentence), (60, 320), (255, 255, 255))  # 30, 160
-        draw(image, font, 'sub-task: {}'.format(subgoal), (60, 360), (0, 255, 255))  # 30, 180
+        texts = ['{}: {}'.format(l, s) for l, s in zip(labels, [sentence, subtask])]
+        sizes = [font.getsize(s) for s in texts]
+        for text, size, pos, color in zip(texts, sizes, positions, colors):
+            draw(image, font, text, pos, color)
+
         size = np.array(image.size) / 2
         image = image.resize(size.astype(int), Image.ANTIALIAS)
         images[i] = image
@@ -653,7 +667,12 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
                 break
             elif keyboard_input == 'r':
                 status['restart'] = True
+                logger.info('restarted by the user')
                 return status
+            elif keyboard_input == 's':
+                status['finished'] = True
+                logger.info('finished by the user')
+                break
 
             if not self.language_queue.empty():
                 self.sentence = self.language_queue.get()
@@ -734,6 +753,7 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
                 control: carla.VehicleControl = self.control_evaluator.run_step(final_image)
                 stop: float = self.stop_evaluator.run_step(final_image)
                 sub_goal = fetch_high_level_command_from_index(self.control_evaluator.cmd).lower()
+                logger.info('{} {:+6.4f}'.format(sub_goal, stop))
                 # logger.info('throttle {:+6.4f}, steer {:+6.4f}, delayed {}, current {:d}, stop {:+6.4f}'.
                 #             format(control.throttle, control.steer, frame - self.agent.image_frame_number, action_index,
                 #                    stop))
@@ -743,7 +763,7 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
                 agent_len(self.agent.data_frame_dict[self.agent.data_frame_number].state.transform.location)
                 stop_buffer.append(stop)
                 recent_buffer = stop_buffer[-3:]
-                status['stopped'] = len(recent_buffer) > 2 and sum(list(map(lambda x: x > 0.0, recent_buffer))) > 1
+                status['stopped'] = len(recent_buffer) > 2 and sum(list(map(lambda x: x > 0.0, recent_buffer))) > 0
 
             if self.show_image and self.agent.image_frame is not None:
                 self.show(self.agent.image_frame, clock, extra_str=self.sentence)
@@ -1032,14 +1052,10 @@ def main():
 
 
 if __name__ == '__main__':
-    directory = EvaluationDirectory(40, 'ls-town2', 72500, 'online')
-    audio_manager = AudioManager(directory)
-    info = audio_manager.load_audio_info()
-    for traj_index in info.keys():
-        generate_video_with_audio(directory, traj_index)
+    # directory = EvaluationDirectory(40, 'ls-town2', 72500, 'online')
+    # audio_manager = AudioManager(directory)
+    # info = audio_manager.load_audio_info()
+    # for traj_index in info.keys():
+    #     generate_video_with_audio(directory, traj_index)
 
-    # todo: update the way to count wav files
-    # todo: save the video during the gameplay
-    # todo: update the image and segment indices
-
-    # main()
+    main()
