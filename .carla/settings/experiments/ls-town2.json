@@ -24,7 +24,7 @@
     "stop": {
         "index": 40,
         "name": "stop-town1-ls",
-        "step": 35000
+        "step": 100000
     },
     "high": {
         "index": 40,

@@ -136,7 +136,9 @@ def generate_video_with_audio(directory: EvaluationDirectory, traj_index: int):
     tmp_video_path = root_dir / 'tmp{:02d}.mp4'.format(traj_index)
     out_audio_path = root_dir / 'audio{:02d}.wav'.format(traj_index)
     out_video_path = root_dir / 'video{:02d}.mp4'.format(traj_index)
+    out_sub_path = root_dir / 'video{:02d}.vtt'.format(traj_index)
     audio_manager = AudioManager(directory)
+    export_subtitle = False
 
     if out_video_path.exists():
         return True
@@ -192,6 +194,7 @@ def generate_video_with_audio(directory: EvaluationDirectory, traj_index: int):
     duration = min(duration_audio, duration_image, duration_state)
     num_frames = int(round(duration * TARGET_FPS))
     timestamps = [int(round(start_ts + i * 1e3 / TARGET_FPS)) for i in range(num_frames)]
+    relative_timings = [(ts - start_ts) * TARGET_FPS / 1e3 for ts in timestamps]
     image_frames = [interpolate(ts) for ts in timestamps]
 
     image_path_list = [image_path_func(f) for f in image_frames]
@@ -218,36 +221,64 @@ def generate_video_with_audio(directory: EvaluationDirectory, traj_index: int):
     subtasks = [subtask_dict[f] for f in image_frames]
     logger.info('read {} images'.format(len(image_dict.keys())))
 
-    font_path = str(Path.cwd() / 'Roboto-Regular.ttf')
-    font = ImageFont.truetype(font_path, 30)
+    if export_subtitle:
+        texts = ['sentence: {}\nsubtask: {}'.format(s1, s2) for s1, s2 in zip(sentences, subtasks)]
+        indices = unique_with_islices(texts)
 
-    def draw(image, font, text, pos, color):
-        draw = ImageDraw.Draw(image)
-        text_size = font.getsize(text)
-        xmargin, ymargin = 7, 5
-        pos1 = (pos[0] - xmargin, pos[1] - ymargin)
-        pos2 = (pos[0] + text_size[0] + xmargin, pos[1] + text_size[1] + ymargin)
-        fill = 'rgb({}, {}, {})'.format(color[2], color[1], color[0])
-        draw.rectangle([pos1, pos2], fill='rgb(0, 0, 0)')
-        draw.text(pos, text, fill=fill, font=font)
+        def format_timing(timing: float):
+            sec = timing % 60
+            rem = int(round(timing - sec) / 60)
+            min = rem % 60
+            hr = int(round(rem / 60))
+            print(timing, hr, min, sec)
+            return '{:02d}:{:02d}:{:06.3f}'.format(hr, min, sec)
 
-    labels = ['sentence', 'sub-task']
-    positions = [(50, 350), (50, 390)]
-    colors = [(255, 255, 255), (0, 255, 255)]
-    for i, (image, sentence, subtask) in enumerate(zip(images, sentences, subtasks)):
-        size = np.array(image.size) * 2
-        image = image.resize(size.astype(int), Image.ANTIALIAS)
-        texts = ['{}: {}'.format(l, s) for l, s in zip(labels, [sentence, subtask])]
-        sizes = [font.getsize(s) for s in texts]
-        for text, size, pos, color in zip(texts, sizes, positions, colors):
-            draw(image, font, text, pos, color)
+        def format_interval(t1: float, t2: float):
+            return '{} --> {}'.format(format_timing(t1), format_timing(t2))
 
-        size = np.array(image.size) / 2
-        image = image.resize(size.astype(int), Image.ANTIALIAS)
-        images[i] = image
+        lines = ['WEBVTT']
+        for text, (i1, i2) in indices:
+            f1 = image_frames[i1]
+            f2 = image_frames[i2] if i2 < len(image_frames) else image_frames[i2-1]
+            t1 = (interpolate_timing_by_frame(f1, timing_dict, sorted_frames) - start_ts) / 1e3
+            t2 = (interpolate_timing_by_frame(f2, timing_dict, sorted_frames) - start_ts) / 1e3
+            # t1 = relative_timings[i1]
+            # t2 = relative_timings[i2-1]
+            lines.append('\n'.join([format_interval(t1, t2), text]))
+        line = '\n\n'.join(lines)
+        with open(str(out_sub_path), 'w') as file:
+            file.write(line)
+        return True
+    else:
+        font_path = str(Path.cwd() / 'Roboto-Regular.ttf')
+        font = ImageFont.truetype(font_path, 30)
+
+        def draw(image, font, text, pos, color):
+            draw = ImageDraw.Draw(image)
+            text_size = font.getsize(text)
+            xmargin, ymargin = 7, 5
+            pos1 = (pos[0] - xmargin, pos[1] - ymargin)
+            pos2 = (pos[0] + text_size[0] + xmargin, pos[1] + text_size[1] + ymargin)
+            fill = 'rgb({}, {}, {})'.format(color[2], color[1], color[0])
+            draw.rectangle([pos1, pos2], fill='rgb(0, 0, 0)')
+            draw.text(pos, text, fill=fill, font=font)
+
+        labels = ['sentence', 'sub-task']
+        positions = [(50, 350), (50, 390)]
+        colors = [(255, 255, 255), (0, 255, 255)]
+        for i, (image, sentence, subtask) in enumerate(zip(images, sentences, subtasks)):
+            size = np.array(image.size) * 2
+            image = image.resize(size.astype(int), Image.ANTIALIAS)
+            texts = ['{}: {}'.format(l, s) for l, s in zip(labels, [sentence, subtask])]
+            sizes = [font.getsize(s) for s in texts]
+            for text, size, pos, color in zip(texts, sizes, positions, colors):
+                draw(image, font, text, pos, color)
+
+            size = np.array(image.size) / 2
+            image = image.resize(size.astype(int), Image.ANTIALIAS)
+            images[i] = image
+        logger.info('write texts on images')
     images = [np.array(i) for i in images]
-    logger.info('write texts on images')
-
     video_from_memory(images, out_video_path, framerate=TARGET_FPS, revert=False)
     logger.info('save temporary video')
 
@@ -546,6 +577,7 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
         self.audio_queue = audio_queue
         self.audio_setup_dict = audio_setup_dict
         self.last_sub_task = None
+        self.sentence = None
 
     @property
     def eval_info(self):
@@ -644,6 +676,13 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
         self.high_evaluator.initialize()
         self.high_data_dict[t] = []
         self.final_images = []
+
+        # while not self.event.is_set():
+        #     if not self.language_queue.empty():
+        #         self.sentence = self.language_queue.get()
+        #     if self.sentence is not None:
+        #         break
+
         self.sentence = get_random_sentence_from_keyword(self.eval_keyword)
         self.last_sub_task = None
         logger.info('moved the vehicle to the position {}'.format(t))
@@ -660,6 +699,7 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
         stop_buffer = []
         while not status['exited'] or not status['collided']:
             keyboard_input = listen_keyboard()
+            updated = False
             if keyboard_input == 'q':
                 status['exited'] = True
                 self.event.set()
@@ -675,6 +715,7 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
                 break
 
             if not self.language_queue.empty():
+                updated = True
                 self.sentence = self.language_queue.get()
                 logger.info('sentence was updated: {}'.format(self.sentence))
                 if self.sentence is None:
@@ -725,7 +766,7 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
 
             # run high-level evaluator when stopped was triggered by the low-level controller
             final_image = self.final_image
-            if status['stopped']:
+            if status['stopped'] or self.control_evaluator.cmd == 3 and updated:
                 sentence = deepcopy(self.sentence)
                 action = self.high_evaluator.run_step(final_image, sentence)
                 action = self.softmax(action)
@@ -763,7 +804,7 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
                 agent_len(self.agent.data_frame_dict[self.agent.data_frame_number].state.transform.location)
                 stop_buffer.append(stop)
                 recent_buffer = stop_buffer[-3:]
-                status['stopped'] = len(recent_buffer) > 2 and sum(list(map(lambda x: x > 0.0, recent_buffer))) > 0
+                status['stopped'] = len(recent_buffer) > 2 and sum(list(map(lambda x: x > 0.0, recent_buffer))) > 1
 
             if self.show_image and self.agent.image_frame is not None:
                 self.show(self.agent.image_frame, clock, extra_str=self.sentence)
@@ -856,7 +897,7 @@ def interpolate_timing_by_frame(query_frame: int, timing_dict: Dict[int, int], s
         return int(round(timing_dict[f2] + dd * dv))
     elif n2_frame < 0 and n1_frame >= 0:
         if n1_index + 1 >= len(sorted_frames):
-            raise IndexError('too large n1_index value {}, {}, {}'.format(query, n1_index, len(sorted_frames)))
+            raise IndexError('too large n1_index value {}, {}, {}'.format(query_frame, n1_index, len(sorted_frames)))
         f1, f2 = n1_frame, sorted_frames[n1_index + 1]
         dv = (timing_dict[f2] - timing_dict[f1]) / (f2 - f1)
         dd = f1 - query_frame
@@ -1052,10 +1093,10 @@ def main():
 
 
 if __name__ == '__main__':
-    # directory = EvaluationDirectory(40, 'ls-town2', 72500, 'online')
-    # audio_manager = AudioManager(directory)
-    # info = audio_manager.load_audio_info()
-    # for traj_index in info.keys():
-    #     generate_video_with_audio(directory, traj_index)
+    directory = EvaluationDirectory(40, 'ls-town2', 72500, 'online')
+    audio_manager = AudioManager(directory)
+    info = audio_manager.load_audio_info()
+    for traj_index in info.keys():
+        generate_video_with_audio(directory, traj_index)
 
-    main()
+    # main()
