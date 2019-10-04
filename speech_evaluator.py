@@ -129,7 +129,7 @@ class AudioManager:
         return audio_data, timing
 
 
-def generate_video_with_audio(directory: EvaluationDirectory, traj_index: int):
+def generate_video_with_audio(directory: EvaluationDirectory, traj_index: int, from_replay: bool):
     root_dir = directory.root_dir
     timing_path = root_dir / 'audios/timing{:02d}.json'.format(traj_index)
     state_path = root_dir / 'states/traj{:02d}.json'.format(traj_index)
@@ -137,6 +137,7 @@ def generate_video_with_audio(directory: EvaluationDirectory, traj_index: int):
     out_audio_path = root_dir / 'audio{:02d}.wav'.format(traj_index)
     out_video_path = root_dir / 'video{:02d}.mp4'.format(traj_index)
     out_sub_path = root_dir / 'video{:02d}.vtt'.format(traj_index)
+    image_dir = root_dir / 'replays/images' if from_replay else 'images'
     audio_manager = AudioManager(directory)
     export_subtitle = False
 
@@ -147,7 +148,7 @@ def generate_video_with_audio(directory: EvaluationDirectory, traj_index: int):
         return False
 
     def image_path_func(frame: int):
-        return root_dir / 'images/{:08d}e.png'.format(frame)
+        return image_dir / '{:08d}e.png'.format(frame)
 
     # read audio
     audio_data, audio_start_ts = audio_manager.load_audio_with_timing(traj_index)
@@ -163,7 +164,7 @@ def generate_video_with_audio(directory: EvaluationDirectory, traj_index: int):
     def get_frame_from_image_path(image_path):
         return int(image_path.stem[:-1])
 
-    frame_from_images = [get_frame_from_image_path(p) for p in sorted((root_dir / 'images').glob('*e.png'))]
+    frame_from_images = [get_frame_from_image_path(p) for p in sorted(image_dir.glob('*e.png'))]
     with open(str(timing_path), 'r') as file:
         raw_timing_dict = json.load(file)
     timing_dict = dict()
@@ -248,15 +249,17 @@ def generate_video_with_audio(directory: EvaluationDirectory, traj_index: int):
         line = '\n\n'.join(lines)
         with open(str(out_sub_path), 'w') as file:
             file.write(line)
-        return True
     else:
+        scale = 3
+        font_size = 15
+
         font_path = str(Path.cwd() / 'Roboto-Regular.ttf')
-        font = ImageFont.truetype(font_path, 30)
+        font = ImageFont.truetype(font_path, font_size * scale)
 
         def draw(image, font, text, pos, color):
             draw = ImageDraw.Draw(image)
             text_size = font.getsize(text)
-            xmargin, ymargin = 7, 5
+            xmargin, ymargin = 7 * scale, 5 * scale
             pos1 = (pos[0] - xmargin, pos[1] - ymargin)
             pos2 = (pos[0] + text_size[0] + xmargin, pos[1] + text_size[1] + ymargin)
             fill = 'rgb({}, {}, {})'.format(color[2], color[1], color[0])
@@ -264,11 +267,11 @@ def generate_video_with_audio(directory: EvaluationDirectory, traj_index: int):
             draw.text(pos, text, fill=fill, font=font)
 
         labels = ['sentence', 'sub-task']
-        positions = [(50, 350), (50, 390)]
+        positions = [(25 * scale, 175 * scale), (25 * scale, 200 * scale)]
         colors = [(255, 255, 255), (0, 255, 255)]
         for i, (image, sentence, subtask) in enumerate(zip(images, sentences, subtasks)):
             size = np.array(image.size) * 2
-            image = image.resize(size.astype(int), Image.ANTIALIAS)
+            # image = image.resize(size.astype(int), Image.ANTIALIAS)
             texts = ['{}: {}'.format(l, s) for l, s in zip(labels, [sentence, subtask])]
             sizes = [font.getsize(s) for s in texts]
             for text, size, pos, color in zip(texts, sizes, positions, colors):
@@ -660,6 +663,18 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
             json.dump(target_sensor.timing_dict, file, indent=4)
         return target_sensor.timing_dict
 
+    def export_transform_dict(self, t: int):
+        target_sensor = None
+        if 'extra' in self.agent.camera_sensor_dict:
+            target_sensor = self.agent.camera_sensor_dict['extra']
+        elif 'center' in self.agent.camera_sensor_dict:
+            target_sensor = self.agent.camera_sensor_dict['center']
+        if target_sensor is None:
+            return dict()
+        with open(str(self.transform_path(t)), 'w') as file:
+            json.dump(target_sensor.transform_dict, file, indent=4)
+        return target_sensor.transform_dict
+
     def run_single_trajectory(self, t: int, transform: carla.Transform) -> Dict[str, bool]:
         status = {
             'exited': False,  # has to finish the entire loop
@@ -985,7 +1000,7 @@ def video_saver(directory: EvaluationDirectory, video_queue: Queue, event: Event
             generated = False
             count = 0
             while not generated and count < max_trial:
-                generated = generate_video_with_audio(directory, traj_index)
+                generated = generate_video_with_audio(directory, traj_index, False)
                 count += 1
     event.set()
 
@@ -1089,14 +1104,18 @@ def main():
 
     info = audio_manager.load_audio_info()
     for traj_index in info.keys():
-        generate_video_with_audio(directory, traj_index)
+        generate_video_with_audio(directory, traj_index, False)
+
+
+def generate_video_from_replay(directory):
+    audio_manager = AudioManager(directory)
+    info = audio_manager.load_audio_info()
+    for traj_index in info.keys():
+        generate_video_with_audio(directory, traj_index, True)
 
 
 if __name__ == '__main__':
     directory = EvaluationDirectory(40, 'ls-town2', 72500, 'online')
-    audio_manager = AudioManager(directory)
-    info = audio_manager.load_audio_info()
-    for traj_index in info.keys():
-        generate_video_with_audio(directory, traj_index)
-
+    generate_video_with_audio(directory, 7, True)
+    # generate_video_from_replay(directory)
     # main()

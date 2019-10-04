@@ -1,15 +1,21 @@
+import json
 import re
 import sys
 import wave
 from itertools import chain
+from math import sqrt
 from typing import Tuple
 
 import numpy as np
 from pathlib import Path
 
 import pyaudio
+from torch.nn import L1Loss
+from torch.optim import Adam
 
+from data.types import CarState, DriveDataFrame
 from speech_evaluator import ResumableMicrophoneStream
+from util.directory import EvaluationDirectory
 
 RED = '\033[0;31m'
 GREEN = '\033[0;32m'
@@ -293,53 +299,93 @@ def save_audio_file_with_timing_info(audio_dict: dict, traj_index: int):
     data = b''.join(values)
     save_wav(data, Path.home() / '.tmp/audio/{}.wav'.format(t1))
 
-    # # diffs = [t2 - t1 for t1, t2 in zip(timestamps[:-1], timestamps[1:])]
-    # # diffs.append(0.1)
-    #
-    # unit_length = len(values[0])
-    # unit_count = int(round(unit_length / CHUNK_SIZE))
-    # print(unit_length, unit_count)
-    #
-    # def frame_from_timestamp(time, unit_length):
-    #     return int(round(time / 1e3 / UNIT_DURATION * unit_length))
-    #
-    # total_length = frame_from_timestamp(t2 - t1, unit_length) + unit_length
-    # # data = list(b'\0' * total_length)  # 0.04987576772443264
-    # # for i, (v, t) in enumerate(zip(values, timestamps)):
-    # #     index = frame_from_timestamp(t - t1, unit_length)
-    # #     print(i, t, index)
-    # #     data[index:index+unit_length] = v
-    # # data = bytearray(data)
-    #
-    # print((t2 - t1) / 1e3 + 0.1)
-    # print(len(data) / 2 / 16000)
-    # # print(total_length)
-    # # print(len(v) * len(values))
+
+def replay_from_state(directory: EvaluationDirectory):
+    traj_index_set = directory.traj_indices_from_state_dir()
+    for traj_index in traj_index_set:
+        with open(str(directory.state_path(traj_index)), 'r') as file:
+            state_dict = json.load(file)
+        frame_range = state_dict['frame_range']
+        data_frame_list = state_dict['data_frames']
+        transforms = [DriveDataFrame.load_from_str(d).state.transform for d in data_frame_list]
 
 
 def main():
-    event = Event()
-    queue = Queue()
-    manager = Manager()
-    audio_dict = manager.dict()
-    audio_setup_dict = manager.dict()
+    directory = EvaluationDirectory(40, 'ls-town2', 72500, 'online')
+    replay_from_state(directory)
 
-    def audio_path_func(timestamp):
-        root_dir = Path.home() / '.tmp/audio'
-        return root_dir / '{}.wav'.format(timestamp)
 
-    # processes = [
-    #     Process(target=launch_recognizer, args=(queue, event, audio_path_func, audio_dict, audio_setup_dict)),
-    #     # Process(target=generate_video_from_clips, args=(video_queue, event))
-    # ]
-    # for p in processes:
-    #     p.start()
-    # sleep(10)
-    launch_recognizer(queue, event, audio_path_func, audio_dict, audio_setup_dict)
-    # for p in processes:
-    #     p.join()
-    save_audio_file_with_timing_info(audio_dict, 0)
+def test():
+    import carla
+    from carla import ColorConverter as cc
+
+    client = carla.Client('172.0.0.1', 6666)
+    client.set_timeout(2.0)
+    world = client.get_world()
+    # spectator = world.get_actors().filter('spectator')[0]
+
+    bp_library = world.get_blueprint_library()
+    camera_bp = bp_library.find('sensor.camera.rgb')
+    camera_bp.set_attribute('image_size_x', '640')
+    camera_bp.set_attribute('image_size_y', '360')
+
+    def process_img(image):
+        image.convert(cc.Raw)
+        image.save_to_disk('_out/{:08d}.png'.format(image.frame_number))
+        _last_transform = image.transform
+        print('process_img', image.frame_number, _last_transform)
+        # image.save_to_disk('_out/%08d' % image.frame_number)
+
+    def move_camera(agent, transform: carla.Transform):
+        transform.location.z += 0.1
+        agent.set_simulate_physics(False)
+        agent.set_transform(transform)
+        agent.set_simulate_physics(True)
+
+    json_path = '/home/junha/projects/language-grounded-driving/.carla/evaluations/exp40/ls-town2/step072500/online/states/traj07.json'
+    with open(json_path, 'r') as file:
+        data_frame_str_list = json.load(file)['data_frames']
+    transforms = [DriveDataFrame.load_from_str(d).state.transform for d in data_frame_str_list]
+
+    camera = world.spawn_actor(camera_bp, transforms[0])
+    camera.listen(process_img)
+    _last_transform = transforms[0]
+
+    def compare_transform(t1, t2):
+        dx = t1.location.x - t2.location.x
+        dy = t1.location.y - t2.location.y
+        dl = sqrt(dx ** 2 + dy ** 2)
+        print(dl)
+        return dl
+
+    for index, transform in enumerate(transforms):
+        while True:
+            move_camera(camera, transform)
+            world.tick()
+            dist = compare_transform(transform, camera.get_transform())
+            print(index, dist)
+            if dist < 1e-2:
+                break
+
+    # try:
+    #     index = 0
+    #     while index < len(transforms):
+    #         print(index, _last_transform, transforms[index])
+    #         if compare_transform(_last_transform, transforms[index]) < 0.1:
+    #             if index == len(transforms) - 1:
+    #                 break
+    #             move_camera(camera, transforms[index + 1])
+    #             world.wait_for_tick()
+    #         else:
+    #             world.wait_for_tick()
+    #             continue
+    #         index += 1
+
+    # except KeyboardInterrupt:
+    camera.destroy()
+    print('Exit')
 
 
 if __name__ == '__main__':
-    main()
+    # main()
+    test()

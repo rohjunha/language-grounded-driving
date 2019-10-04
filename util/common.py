@@ -11,7 +11,7 @@ from time import time, perf_counter
 
 import numpy
 
-logger = None
+loggers = {}
 
 
 def add_carla_module():
@@ -42,16 +42,21 @@ class MyFormatter(Formatter):
 
 
 def get_logger(name):
-    global logger
-    if logger is None:
+    global loggers
+    if name in loggers:
+        return loggers[name]
+    else:
         LEVEL = DEBUG
         logger = getLogger(name)
         logger.setLevel(LEVEL)
-        ch = StreamHandler()
-        ch.setLevel(LEVEL)
-        formatter = MyFormatter()
-        ch.setFormatter(formatter)
-        logger.addHandler(ch)
+        if logger.hasHandlers():
+            return logger
+        else:
+            ch = StreamHandler()
+            ch.setLevel(LEVEL)
+            formatter = MyFormatter()
+            ch.setFormatter(formatter)
+            logger.addHandler(ch)
     return logger
 
 

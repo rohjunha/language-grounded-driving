@@ -195,6 +195,9 @@ class EvaluationDirectory:
         self.video_dir = mkdir_if_not_exists(self.root_dir / 'videos')
         self.audio_dir = mkdir_if_not_exists(self.root_dir / 'audios')
         self.state_dir = mkdir_if_not_exists(self.root_dir / 'states')
+        self.replay_dir = mkdir_if_not_exists(self.root_dir / 'replays')
+        self.replay_image_dir = mkdir_if_not_exists(self.replay_dir / 'images')
+        self.replay_segment_dir = mkdir_if_not_exists(self.replay_dir / 'segments')
         self.summary_dir = mkdir_if_not_exists(self.root_dir / 'summary')
         self.summary_path = self.summary_dir / 'summary.json'
 
@@ -214,13 +217,16 @@ class EvaluationDirectory:
     def timing_path(self, traj_index: int) -> Path:
         return self.audio_dir / 'timing{:02d}.json'.format(traj_index)
 
+    def transform_path(self, traj_index: int) -> Path:
+        return self.replay_dir / 'transform{:02d}.json'.format(traj_index)
+
     def traj_indices_from_state_dir(self) -> Set[int]:
         eval_state_files = sorted(self.state_dir.glob('*.json'))
         video_files = sorted(self.video_dir.glob('traj*.mp4'))
         state_indices = [int(re.findall('traj([\w]+)', f.stem)[0]) for f in eval_state_files]
-        video_indices = [int(re.findall('traj([\w]+)', f.stem[:-1])[0]) for f in video_files]
-        for i, s in enumerate(state_indices):
-            if s not in video_indices:
-                eval_state_files[i].unlink()
-                logger.info('incomplete {} was removed'.format(eval_state_files[i]))
-        return set(video_indices)
+        # video_indices = [int(re.findall('traj([\w]+)', f.stem[:-1])[0]) for f in video_files]
+        # for i, s in enumerate(state_indices):
+        #     if s not in video_indices:
+        #         eval_state_files[i].unlink()
+        #         logger.info('incomplete {} was removed'.format(eval_state_files[i]))
+        return set(state_indices)

@@ -248,7 +248,7 @@ for key in CAMERA_KEYWORDS:
 
 
 class CameraSensor(SensorBase):
-    def __init__(self, parent_actor, image_path_func, timing_dict, width, height, camera_keyword: str):
+    def __init__(self, parent_actor, image_path_func, timing_dict, transform_dict, width, height, camera_keyword: str):
         self.width = width
         self.height = height
         self.camera_keyword = camera_keyword
@@ -257,6 +257,7 @@ class CameraSensor(SensorBase):
         self.image_frame_number = None
         self.image_frame = None
         self.timing_dict = timing_dict
+        self.transform_dict = transform_dict
         weak_self = weakref.ref(self)
         self.sensor.listen(lambda image: CameraSensor.on_listen(weak_self, image))
 
@@ -274,9 +275,11 @@ class CameraSensor(SensorBase):
             return
         frame_number = carla_image.frame_number
         self.timing_dict[frame_number] = get_current_time()
+        self.transform_dict[frame_number] = self.sensor.get_transform()
         self.image_frame_number = frame_number
         numpy_image = numpy_from_carla_image(carla_image)
         self.image_frame = numpy_image
+        # print(frame_number, self.image_frame.shape, self.image_path_func(frame_number))
         cv2.imwrite(str(self.image_path_func(frame_number)), numpy_image)
 
 
@@ -329,6 +332,7 @@ class SynchronousAgent(ExperimentDirectory):
         self.segment_sensor_dict = None
         self.collision_sensor = None
         self.timing_dict = dict()
+        self.transform_dict = dict()
 
         self.args = args
         self.agent_type = agent_type
@@ -458,13 +462,14 @@ class SynchronousAgent(ExperimentDirectory):
                 self.vehicle,
                 partial(self.image_path, camera_keyword=camera_keyword),
                 self.timing_dict,
+                self.transform_dict,
                 self.image_width,
                 self.image_height,
                 camera_keyword)
             for camera_keyword in self.camera_keywords}
         self.camera_sensor_dict['extra'] = CameraSensor(
             self.vehicle, partial(self.image_path, camera_keyword='extra'),
-            self.timing_dict, 320, 240, 'extra')
+            self.timing_dict, self.transform_dict, 1280, 720, 'extra')
             # self.timing_dict, 640, 480, 'extra')
 
     def set_segment_sensor(self):
