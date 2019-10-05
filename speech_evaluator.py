@@ -305,6 +305,295 @@ def generate_video_with_audio(directory: EvaluationDirectory, traj_index: int, f
     return True
 
 
+def draw(sentence, subtask, image, font: ImageFont, scale: int) -> np.array:
+    def _draw(image, font, text, pos, color):
+        draw = ImageDraw.Draw(image)
+        text_size = font.getsize(text)
+        xmargin, ymargin = 7 * scale, 5 * scale
+        pos1 = (pos[0] - xmargin, pos[1] - ymargin)
+        pos2 = (pos[0] + text_size[0] + xmargin, pos[1] + text_size[1] + ymargin)
+        fill = 'rgb({}, {}, {})'.format(color[2], color[1], color[0])
+        draw.rectangle([pos1, pos2], fill='rgb(0, 0, 0)')
+        draw.text(pos, text, fill=fill, font=font)
+
+    labels = ['sentence', 'sub-task']
+    positions = [(25 * scale, 175 * scale), (25 * scale, 200 * scale)]
+    colors = [(255, 255, 255), (0, 255, 255)]
+    texts = ['{}: {}'.format(l, s) for l, s in zip(labels, [sentence, subtask])]
+    sizes = [font.getsize(s) for s in texts]
+    for text, size, pos, color in zip(texts, sizes, positions, colors):
+        _draw(image, font, text, pos, color)
+    return np.array(image)
+
+
+def generate_canonical_data_structure(directory: EvaluationDirectory, traj_index: int, from_replay: bool):
+    root_dir = directory.root_dir
+    data_dir = mkdir_if_not_exists(root_dir / 'summary/traj{:02d}'.format(traj_index))
+
+    in_image_dir = root_dir / 'replays/images' if from_replay else 'images'
+    in_timing_path = root_dir / 'audios/timing{:02d}.json'.format(traj_index)
+    in_state_path = root_dir / 'states/traj{:02d}.json'.format(traj_index)
+
+    data_audio_path = data_dir / 'audio{:02d}.wav'.format(traj_index)
+    data_image_dir = mkdir_if_not_exists(data_dir / 'images')
+    data_annotated_dir = mkdir_if_not_exists(data_dir / 'annotated')
+    data_info_path = data_dir / 'info{:02d}.json'.format(traj_index)
+    data_image_fmt = data_image_dir / '{:08d}e.png'
+    data_subtitle_path = data_dir / 'video{:02d}.vtt'.format(traj_index)
+
+    tmp_video_path = root_dir / 'tmp{:02d}.mp4'.format(traj_index)
+    out_audio_path = root_dir / 'audio{:02d}.wav'.format(traj_index)
+    out_video_path = root_dir / 'video{:02d}.mp4'.format(traj_index)
+    out_sub_path = root_dir / 'video{:02d}.vtt'.format(traj_index)
+
+    audio_manager = AudioManager(directory)
+    export_subtitle = False
+    canonical_info_dict = dict()
+
+    if out_video_path.exists():
+        return True
+
+    if not in_state_path.exists():
+        return False
+
+    def image_path_func(frame: int):
+        return in_image_dir / '{:08d}e.png'.format(frame)
+
+    # read audio
+    audio_data, audio_start_ts = audio_manager.load_audio_with_timing(traj_index)
+
+    # read state
+    with open(str(in_state_path), 'r') as file:
+        state_dict = json.load(file)
+    frame_range = state_dict['frame_range']
+    sentence_from_frame = {i: s for i, s in zip(range(*frame_range), state_dict['sentences'])}
+    subtask_from_frame = {i: s for i, s in zip(range(*frame_range), map(itemgetter(1), state_dict['stop_frames']))}
+
+    # read timing dict and prune with images
+    def get_frame_from_image_path(image_path):
+        return int(image_path.stem[:-1])
+
+    frame_from_images = [get_frame_from_image_path(p) for p in sorted(in_image_dir.glob('*e.png'))]
+    with open(str(in_timing_path), 'r') as file:
+        raw_timing_dict = json.load(file)
+    timing_dict = dict()
+    for k, v in raw_timing_dict.items():
+        if int(k) in frame_from_images:
+            timing_dict[int(k)] = v
+    frame_by_timing = {v: k for k, v in timing_dict.items()}
+    sorted_frames = sorted(timing_dict.keys())
+    sorted_timings = sorted(frame_by_timing.keys())
+    interpolate = partial(
+        interpolate_frame_by_timing, frame_by_timing=frame_by_timing, sorted_timings=sorted_timings)
+
+    # compute the common starting timestamp
+    image_start_ts = sorted_timings[0]
+    state_start_ts = interpolate_timing_by_frame(frame_range[0], timing_dict, sorted_frames)
+    start_ts = max(audio_start_ts, image_start_ts, state_start_ts)
+    end_ts = interpolate_timing_by_frame(frame_range[1], timing_dict, sorted_frames)
+    logger.info('set the interval {}, {}'.format(start_ts, end_ts))
+    canonical_info_dict['start_timestamp'] = start_ts
+    canonical_info_dict['end_timestamp'] = end_ts
+
+    # cut the audio
+    diff_audio_ts = start_ts - audio_start_ts
+    diff_audio_len = int(round(diff_audio_ts / 1e3 * SAMPLE_WIDTH * SAMPLE_RATE))
+    audio_data = audio_data[diff_audio_len:]
+
+    duration_audio = len(audio_data) / (SAMPLE_WIDTH * SAMPLE_RATE)
+    duration_image = (sorted_timings[-1] - start_ts) / 1e3
+    duration_state = (end_ts - start_ts) / 1e3
+    duration = min(duration_audio, duration_image, duration_state)
+    num_frames = int(round(duration * TARGET_FPS))
+    canonical_info_dict['duration'] = duration
+    canonical_info_dict['target_fps'] = TARGET_FPS
+    canonical_info_dict['num_frames'] = num_frames
+    canonical_info_dict['original_frame_range'] = frame_range
+    canonical_info_dict['frame_range'] = 0, num_frames
+    timestamps = [int(round(start_ts + i * 1e3 / TARGET_FPS)) for i in range(num_frames)]
+    image_frames = [interpolate(ts) for ts in timestamps]
+
+    unique_original_frame_list = unique_with_islices(image_frames)
+    canonical_info_dict['unique_original_frame_list'] = unique_original_frame_list
+
+    new_index = 0
+    index_updater = dict()
+    for old_index, new_index_range in unique_original_frame_list:
+        index_updater[old_index] = new_index
+        new_index += 1
+    canonical_info_dict['index_updater'] = index_updater
+    new_frame_list = [index_updater[i] for i in image_frames]
+    unique_frame_list = unique_with_islices(new_frame_list)
+    canonical_info_dict['unique_frame_list'] = unique_frame_list
+    unique_original_indices = list(map(itemgetter(0), unique_original_frame_list))
+    unique_new_indices = [index_updater[i] for i in unique_original_indices]
+    # for old_index, new_index in zip(unique_original_indices, unique_new_indices):
+    #     old_path = image_path_func(old_index)
+    #     new_path = str(data_image_fmt).format(new_index)
+    #     shutil.copy(str(old_path), str(new_path))
+    canonical_info_dict['new_frame_list'] = new_frame_list
+    sentences = [sentence_from_frame[f] for f in image_frames]
+    subtasks = [subtask_from_frame[f] for f in image_frames]
+    canonical_info_dict['sentences'] = sentences
+    canonical_info_dict['subtask'] = subtasks
+
+    # save the info
+    with open(str(data_info_path), 'w') as file:
+        json.dump(canonical_info_dict, file)
+
+    # save the audio
+    audio_frames = int(round(duration * SAMPLE_WIDTH * SAMPLE_RATE))
+    audio_data = audio_data[:audio_frames]
+    save_audio(data_audio_path, audio_data)
+
+    # write a subtitle file
+    texts = ['sentence: {}\nsubtask: {}'.format(s1, s2) for s1, s2 in zip(sentences, subtasks)]
+    unique_text_indices = unique_with_islices(texts)
+
+    def format_timing(timing: float):
+        sec = timing % 60
+        rem = int(round(timing - sec) / 60)
+        min = rem % 60
+        hr = int(round(rem / 60))
+        return '{:02d}:{:02d}:{:06.3f}'.format(hr, min, sec)
+
+    def format_interval(t1: float, t2: float):
+        return '{} --> {}'.format(format_timing(t1), format_timing(t2))
+
+    lines = ['WEBVTT']
+    for text, (i1, i2) in unique_text_indices:
+        f1 = image_frames[i1]
+        f2 = image_frames[i2] if i2 < len(image_frames) else image_frames[i2-1]
+        t1 = (interpolate_timing_by_frame(f1, timing_dict, sorted_frames) - start_ts) / 1e3
+        t2 = (interpolate_timing_by_frame(f2, timing_dict, sorted_frames) - start_ts) / 1e3
+        lines.append('\n'.join([format_interval(t1, t2), text]))
+    line = '\n\n'.join(lines)
+    with open(str(data_subtitle_path), 'w') as file:
+        file.write(line)
+
+    # draw texts on unique images
+    unique_images = [Image.open(str(data_image_fmt).format(i)) for i in unique_new_indices]
+    logger.info('read {} unique images'.format(len(unique_images)))
+    scale = 3
+    font_size = 15
+    font_path = str(Path.home() / 'projects/language-grounded-driving/Roboto-Regular.ttf')
+    font = ImageFont.truetype(font_path, font_size * scale)
+    new_images = []
+    for i, (sentence, subtask, image) in enumerate(zip(sentences, subtasks, unique_images)):
+        new_images.append(draw(sentence, subtask, image, font, scale))
+    # TODO: check with the unique images and texts
+
+
+    # logger.info('write texts on images')
+    # images = [np.array(i) for i in images]
+
+
+    # image_path_list = [image_path_func(f) for f in image_frames]
+    # for p, f in zip(image_path_list, image_frames):
+    #     if not p.exists():
+    #         print(p, f)
+    # assert all(p.exists() for p in image_path_list)
+    # image_path_set = set(image_path_list)
+    # image_dict = dict()
+    # last_value = None
+    # for p in image_path_set:
+    #     key = get_frame_from_image_path(p)
+    #     try:
+    #         value = Image.open(p)
+    #         if value is not None:
+    #             last_value = value
+    #     except:
+    #         if last_value is not None:
+    #             image_dict[key] = last_value
+    #         continue
+    #     image_dict[key] = value
+    # images = [image_dict[f] for f in image_frames]
+
+    # logger.info('read {} images'.format(len(image_dict.keys())))
+    #
+    # if export_subtitle:
+    #     texts = ['sentence: {}\nsubtask: {}'.format(s1, s2) for s1, s2 in zip(sentences, subtasks)]
+    #     indices = unique_with_islices(texts)
+    #
+    #     def format_timing(timing: float):
+    #         sec = timing % 60
+    #         rem = int(round(timing - sec) / 60)
+    #         min = rem % 60
+    #         hr = int(round(rem / 60))
+    #         print(timing, hr, min, sec)
+    #         return '{:02d}:{:02d}:{:06.3f}'.format(hr, min, sec)
+    #
+    #     def format_interval(t1: float, t2: float):
+    #         return '{} --> {}'.format(format_timing(t1), format_timing(t2))
+    #
+    #     lines = ['WEBVTT']
+    #     for text, (i1, i2) in indices:
+    #         f1 = image_frames[i1]
+    #         f2 = image_frames[i2] if i2 < len(image_frames) else image_frames[i2-1]
+    #         t1 = (interpolate_timing_by_frame(f1, timing_dict, sorted_frames) - start_ts) / 1e3
+    #         t2 = (interpolate_timing_by_frame(f2, timing_dict, sorted_frames) - start_ts) / 1e3
+    #         # t1 = relative_timings[i1]
+    #         # t2 = relative_timings[i2-1]
+    #         lines.append('\n'.join([format_interval(t1, t2), text]))
+    #     line = '\n\n'.join(lines)
+    #     with open(str(out_sub_path), 'w') as file:
+    #         file.write(line)
+    # else:
+    #     scale = 3
+    #     font_size = 15
+    #
+    #     font_path = str(Path.cwd() / 'Roboto-Regular.ttf')
+    #     font = ImageFont.truetype(font_path, font_size * scale)
+    #
+    #     def draw(image, font, text, pos, color):
+    #         draw = ImageDraw.Draw(image)
+    #         text_size = font.getsize(text)
+    #         xmargin, ymargin = 7 * scale, 5 * scale
+    #         pos1 = (pos[0] - xmargin, pos[1] - ymargin)
+    #         pos2 = (pos[0] + text_size[0] + xmargin, pos[1] + text_size[1] + ymargin)
+    #         fill = 'rgb({}, {}, {})'.format(color[2], color[1], color[0])
+    #         draw.rectangle([pos1, pos2], fill='rgb(0, 0, 0)')
+    #         draw.text(pos, text, fill=fill, font=font)
+    #
+    #     labels = ['sentence', 'sub-task']
+    #     positions = [(25 * scale, 175 * scale), (25 * scale, 200 * scale)]
+    #     colors = [(255, 255, 255), (0, 255, 255)]
+    #     for i, (image, sentence, subtask) in enumerate(zip(images, sentences, subtasks)):
+    #         size = np.array(image.size) * 2
+    #         # image = image.resize(size.astype(int), Image.ANTIALIAS)
+    #         texts = ['{}: {}'.format(l, s) for l, s in zip(labels, [sentence, subtask])]
+    #         sizes = [font.getsize(s) for s in texts]
+    #         for text, size, pos, color in zip(texts, sizes, positions, colors):
+    #             draw(image, font, text, pos, color)
+    #
+    #         size = np.array(image.size) / 2
+    #         image = image.resize(size.astype(int), Image.ANTIALIAS)
+    #         images[i] = image
+    #     logger.info('write texts on images')
+    # images = [np.array(i) for i in images]
+    # video_from_memory(images, out_video_path, framerate=TARGET_FPS, revert=False)
+    # logger.info('save temporary video')
+    #
+    # # cut out the audio again
+    # audio_frames = int(round(duration * SAMPLE_WIDTH * SAMPLE_RATE))
+    # audio_data = audio_data[:audio_frames]
+    # save_audio(out_audio_path, audio_data)
+    # logger.info('save audio')
+    #
+    # # merge the audio to the video
+    # cmd = ['ffmpeg', '-y', '-i', str(out_video_path), '-c:v', 'libx264', str(tmp_video_path)]
+    # run(cmd)
+    #
+    # video_clip = editor.VideoFileClip(str(tmp_video_path))
+    # audio_clip = editor.AudioFileClip(str(out_audio_path))
+    # video_clip = video_clip.set_audio(audio_clip)
+    # video_clip.write_videofile(str(out_video_path), fps=30)
+    # logger.info('write the final video file {}'.format(out_video_path))
+    # if out_video_path.exists() and tmp_video_path.exists():
+    #     tmp_video_path.unlink()
+    # return True
+
+
 class ResumableMicrophoneStream:
     """Opens a recording stream as a generator yielding the audio chunks."""
 
@@ -1116,6 +1405,7 @@ def generate_video_from_replay(directory):
 
 if __name__ == '__main__':
     directory = EvaluationDirectory(40, 'ls-town2', 72500, 'online')
-    generate_video_with_audio(directory, 7, True)
+    # generate_video_with_audio(directory, 7, True)
+    generate_canonical_data_structure(directory, 7, True)
     # generate_video_from_replay(directory)
     # main()
