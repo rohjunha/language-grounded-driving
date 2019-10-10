@@ -15,8 +15,8 @@ from custom_carla.agents.navigation.roaming_agent import RoamingAgent
 
 from config import DATASET_FRAMERATE
 from data.types import CarState, CarControl, DriveDataFrame
-from game.common import destroy_actor, get_font
-from game.sensors import set_all_sensors, SegmentationSensor, CameraSensor, CollisionSensor
+from game.common import destroy_actor, get_font, show_game, draw_image
+from game.sensors import SegmentationSensor, CameraSensor, CollisionSensor, SensorManager
 from util.common import add_carla_module, get_logger, get_timestamp, set_random_seed
 from util.directory import ExperimentDirectory
 from util.serialize import str_from_waypoint
@@ -66,17 +66,6 @@ class FrameCounter:
 #     array = image[:, :, ::-1]
 #     image_surface = pygame.surfarray.make_surface(array.swapaxes(0, 1))
 #     surface.blit(image_surface, (0, 0))
-
-
-def draw_image(surface, image, blend=False):
-    array = np.frombuffer(image.raw_data, dtype=np.dtype('uint8'))
-    array = np.reshape(array, (image.height, image.width, 4))
-    array = array[:, :, :3]
-    array = array[:, :, ::-1]
-    image_surface = pygame.surfarray.make_surface(array.swapaxes(0, 1))
-    if blend:
-        image_surface.set_alpha(100)
-    surface.blit(image_surface, (0, 0))
 
 
 def should_quit():
@@ -195,13 +184,11 @@ class CarlaSyncWrapper:
     def __init__(
             self,
             world: carla.World,
-            camera_sensor_dict: dict,
-            segmentation_sensor_dict: dict):
+            sensor_manager: SensorManager):
         self.world = world
         self.delta_seconds = 1.0 / DATASET_FRAMERATE
         self.settings = self.world.get_settings()
-        self.camera_sensor_dict = camera_sensor_dict
-        self.segmentation_sensor_dict = segmentation_sensor_dict
+        self.sensor_manager = sensor_manager
         self.world_queue = None
         self.camera_queue_dict = dict()
         self.segmentation_queue_dict = dict()
@@ -225,9 +212,9 @@ class CarlaSyncWrapper:
             target_dict[keyword] = q
 
         self.world_queue = make_queue(self.world.on_tick)
-        for keyword, sensor in self.camera_sensor_dict.items():
+        for keyword, sensor in self.sensor_manager.camera_sensor_dict.items():
             make_queue_dict(self.camera_queue_dict, keyword, sensor.listen)
-        for keyword, sensor in self.segmentation_sensor_dict.items():
+        for keyword, sensor in self.sensor_manager.segmentation_sensor_dict.items():
             make_queue_dict(self.segmentation_queue_dict, keyword, sensor.listen)
         return self
 
@@ -678,27 +665,6 @@ class SynchronousAgent(ExperimentDirectory):
         }
 
 
-def show_game(
-        display,
-        font,
-        image,
-        clock,
-        road_option = None,
-        is_intersection = None,
-        extra_str: str = ''):
-    draw_image(display, image)
-    strs = ['{:5.3f}'.format(clock.get_fps())]
-    if road_option is not None:
-        strs += [road_option.name.lower()]
-    if is_intersection is not None:
-        strs += [str(is_intersection)]
-    if extra_str:
-        strs += [extra_str]
-    text_surface = font.render(', '.join(strs), True, (255, 255, 255))
-    display.blit(text_surface, (8, 10))
-    pygame.display.flip()
-
-
 class GameEnvironment:
     def __init__(self, args, agent_type: str, transform_index: int = 0):
         self.args = args
@@ -711,6 +677,7 @@ class GameEnvironment:
         self.client = None
         self.world = None
         self.agent = None
+        self.sensor_manager = None
 
         self.display = None
         self.font = None
@@ -736,15 +703,10 @@ class GameEnvironment:
             world=self.world,
             transform=self.transforms[self.transform_index],
             agent_type=self.agent_type,)
+        self.camera_keywords = args.camera_keywords
+        self.sensor_manager = SensorManager(self.world, self.vehicle,
+                                            args.camera_keywords, args.width, args.height, args.use_extra)
         set_world_synchronous(self.world)
-
-        # self.agent = SynchronousAgent(
-        #     world=self.world,
-        #     args=self.args,
-        #     transform=self.transforms[self.transform_index],
-        #     agent_type=self.agent_type,
-        #     render_image=self.render_image,
-        #     evaluation=self.evaluation)
         assert self.world.get_settings().synchronous_mode
 
     @property
@@ -766,6 +728,12 @@ class GameEnvironment:
     def run(self) -> None:
         raise NotImplementedError
 
+    def destroy(self):
+        if self.agent is not None:
+            self.agent.destroy()
+        if self.sensor_manager is not None:
+            self.sensor_manager.destroy()
+
 
 def main():
     actor_list = []
@@ -781,9 +749,7 @@ def main():
     client.set_timeout(2.0)
     world = client.get_world()
 
-    collision_sensor = None
-    camera_sensor_dict = dict()
-    segmentation_sensor_dict = dict()
+    sensor_manager = None
     try:
         m = world.get_map()
         start_pose = random.choice(m.get_spawn_points())
@@ -797,10 +763,9 @@ def main():
         actor_list.append(vehicle)
         vehicle.set_simulate_physics(False)
 
-        camera_sensor_dict, segmentation_sensor_dict, collision_sensor = set_all_sensors(
-            world, vehicle, ['right', 'center', 'left'], 200, 88, False)
+        sensor_manager = SensorManager(world, vehicle, ['right', 'center', 'left'], 200, 88, False)
         print(vehicle.id)
-        with CarlaSyncWrapper(world, camera_sensor_dict, segmentation_sensor_dict) as sync_mode:
+        with CarlaSyncWrapper(world, sensor_manager) as sync_mode:
             while True:
                 if should_quit():
                     return
@@ -838,13 +803,8 @@ def main():
         print('destroying actors.')
         for actor in actor_list:
             actor.destroy()
-        for sensor in camera_sensor_dict.values():
-            sensor.destroy()
-        for sensor in segmentation_sensor_dict.values():
-            sensor.destroy()
-        if collision_sensor is not None:
-            collision_sensor.destroy()
-
+        if sensor_manager is not None:
+            sensor_manager.destroy()
         pygame.quit()
         print('done.')
 

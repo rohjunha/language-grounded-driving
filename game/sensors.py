@@ -2,6 +2,7 @@ import math
 import weakref
 from collections import defaultdict
 from functools import partial
+from typing import List
 
 from config import CAMERA_KEYWORDS, DATASET_FRAMERATE, EVAL_FRAMERATE_SCALE
 from game.common import destroy_actor
@@ -73,7 +74,6 @@ class CollisionSensor(SensorBase):
         impulse = event.normal_impulse
         intensity = math.sqrt(impulse.x ** 2 + impulse.y ** 2 + impulse.z ** 2)
         self.history[event.frame_number] += intensity
-
 
 
 class CameraSensor(SensorBase):
@@ -174,3 +174,23 @@ def set_all_sensors(world, agent, camera_keywords, width, height, use_extra):
         segmentation_sensor_dict[keyword] = generate_segmentation_sensor(world, agent, keyword, width, height)
     collision_sensor = generate_collision_sensor(world, agent)
     return camera_sensor_dict, segmentation_sensor_dict, collision_sensor
+
+
+class SensorManager:
+    def __init__(self, world, agent, camera_keywords: List[str], width: int, height: int, use_extra: bool):
+        self.camera_sensor_dict = dict()
+        self.segmentation_sensor_dict = dict()
+        self.collision_sensor = None
+        self.camera_sensor_dict, self.segmentation_sensor_dict, self.collision_sensor = \
+            set_all_sensors(world, agent, camera_keywords, width, height, use_extra)
+
+    def destroy(self):
+        for sensor in self.camera_sensor_dict.values():
+            sensor.destroy()
+        for sensor in self.segmentation_sensor_dict.values():
+            sensor.destroy()
+        if self.collision_sensor is not None:
+            self.collision_sensor.destroy()
+
+    def __del__(self):
+        self.destroy()

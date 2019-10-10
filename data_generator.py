@@ -20,20 +20,25 @@
 # from environment import set_world_asynchronous, set_world_synchronous, should_quit, FrameCounter, GameEnvironment
 import random
 from time import sleep
-from typing import List
+from typing import List, Dict, Any
 
+import cv2
 
-
-from game.common import get_font
+from custom_carla.agents.navigation.agent import ControlWithInfo
+from data.types import DriveDataFrame, CarState
+from game.common import get_font, draw_image, np_from_carla_image
 from game.environment import GameEnvironment, set_world_asynchronous, set_world_synchronous, should_quit, FrameCounter, \
-    CarlaSyncWrapper, draw_image
+    CarlaSyncWrapper
 # from evaluator import LowLevelEvaluator
 # from parameter import Parameter
-from game.sensors import set_all_sensors
-from util.common import add_carla_module, get_logger, fetch_ip_address
+from game.sensors import set_all_sensors, SensorManager
+from util.common import add_carla_module, get_logger, fetch_ip_address, get_timestamp
 # from util.directory import fetch_dataset_dir
 # from util.road_option import fetch_index_from_road_option, fetch_name_from_road_option
 #
+from util.directory import ExperimentDirectory
+from util.serialize import str_from_waypoint
+
 logger = get_logger(__name__)
 add_carla_module()
 import carla
@@ -301,13 +306,86 @@ import carla
 #         self.count += 1
 
 
-class OfflineGeneratorEnvironment(GameEnvironment):
+class FrameSnapshot:
+    def __init__(self, timestamp, actor_snapshot: carla.ActorSnapshot, rgb_dict: Dict[str, Any], seg_dict: Dict[str, Any]):
+        self.timestamp = timestamp
+        if actor_snapshot is None:
+            self.car_state = None
+        else:
+            self.car_state = CarState(
+                actor_snapshot.get_transform(),
+                actor_snapshot.get_velocity(),
+                actor_snapshot.get_angular_velocity(),
+                actor_snapshot.get_acceleration())
+        self.control = None
+        self.rgb_dict = rgb_dict
+        self.seg_dict = seg_dict
+        # self.vis_seg_dict = dict()
+        # for keyword in self.seg_dict.keys():
+        #     seg_dict[keyword].convert(carla.ColorConverter.CityScapesPalette)
+
+    @property
+    def valid(self):
+        return self.timestamp is not None
+
+    @property
+    def frame(self):
+        return self.timestamp.frame
+
+    @property
+    def sim_elapsed(self):
+        return self.timestamp.elapsed_seconds
+
+    @property
+    def real_elapsed(self):
+        return self.timestamp.platform_timestamp
+
+    @property
+    def data_frame(self):
+        return DriveDataFrame(self.car_state, self.control)
+
+    @property
+    def waypoint(self):
+        return self.control.waypoint if self.control is not None else None
+
+
+class SnapshotSaver(ExperimentDirectory):
+    def __init__(self, timestamp):
+        ExperimentDirectory.__init__(self, timestamp)
+
+    def save_image(self, frame, keyword, image):
+        array = np_from_carla_image(image)
+        cv2.imwrite(str(self.image_path(frame, keyword)), array)
+
+    def save(self, frame_snapshot: FrameSnapshot):
+        import numpy as np
+        for keyword in frame_snapshot.rgb_dict.keys():
+            image = np_from_carla_image(frame_snapshot.rgb_dict[keyword], False)
+            cv2.imwrite(str(self.image_path(frame_snapshot.frame, keyword)), image)
+        for keyword in frame_snapshot.seg_dict.keys():
+            image = np_from_carla_image(frame_snapshot.seg_dict[keyword])
+            cv2.imwrite(str(self.segment_image_path(frame_snapshot.frame, keyword)), image)
+        with open(str(self.experiment_data_path), 'a') as file:
+            file.write('{}:{}\n'.format(self.frame_str(frame_snapshot.frame), frame_snapshot.data_frame))
+        if frame_snapshot.waypoint is not None:
+            with open(str(self.experiment_waypoint_path), 'a') as file:
+                file.write('{}\n'.format(str_from_waypoint(frame_snapshot.waypoint)))
+
+
+class OfflineGeneratorEnvironment(GameEnvironment, SnapshotSaver):
     def __init__(self, args):
         GameEnvironment.__init__(self, args=args, agent_type='roaming', transform_index=0)
-        self.actor_list = []
-        self.collision_sensor = None
-        self.camera_sensor_dict = dict()
-        self.segmentation_sensor_dict = dict()
+        SnapshotSaver.__init__(self, get_timestamp())
+
+    def collect(self, sync_mode: CarlaSyncWrapper) -> FrameSnapshot:
+        actor_snapshot = None
+        try:
+            snapshot, rgb_dict, seg_dict = sync_mode.tick(timeout=2.0)
+            if snapshot.has_actor(self.vehicle.id):
+                actor_snapshot = snapshot.find(self.vehicle.id)
+        except:
+            return FrameSnapshot(None, None, dict(), dict())
+        return FrameSnapshot(snapshot.timestamp, actor_snapshot, rgb_dict, seg_dict)
 
     def run(self):
         import pygame
@@ -321,20 +399,15 @@ class OfflineGeneratorEnvironment(GameEnvironment):
             (200, 88),
             pygame.HWSURFACE | pygame.DOUBLEBUF)
         font = get_font()
-        clock = pygame.time.Clock()
+        clock = pygame.time.Clock() if self.show_image else FrameCounter()
 
         try:
             map = self.world.get_map()
             start_pose = random.choice(map.get_spawn_points())
             waypoint = map.get_waypoint(start_pose.location)
 
-            self.camera_sensor_dict, self.segmentation_sensor_dict, self.collision_sensor = set_all_sensors(
-                self.world, self.agent.vehicle, ['right', 'center', 'left'], 200, 88, False)
-            print(self.agent.vehicle.id)
-
             frame = None
             count = 0
-            clock = pygame.time.Clock() if self.show_image else FrameCounter()
 
             set_world_asynchronous(self.world)
             sleep(0.5)
@@ -343,28 +416,30 @@ class OfflineGeneratorEnvironment(GameEnvironment):
             waypoint_dict = dict()
             road_option_dict = dict()
 
-            with CarlaSyncWrapper(self.world, self.camera_sensor_dict, self.segmentation_sensor_dict) as sync_mode:
+            self.sensor_manager = SensorManager(self.world, self.vehicle, ['center', 'left', 'right'], 200, 88, False)
+            with CarlaSyncWrapper(self.world, self.sensor_manager) as sync_mode:
                 while True:
                     if should_quit():
                         return
                     clock.tick()
 
-                    snapshot, rgb_dict, seg_dict = sync_mode.tick(timeout=2.0)
-                    # if snapshot.has_actor(vehicle.id):
-                    #     actor_snapshot = snapshot.find(vehicle.id)
-                    #     print(actor_snapshot.get_transform())
-
-                    # Choose the next waypoint and update the car location.
-                    waypoint = random.choice(waypoint.next(1.5))
-                    self.agent.move_vehicle(waypoint.transform)
-                    for keyword in seg_dict.keys():
-                        seg_dict[keyword].convert(carla.ColorConverter.CityScapesPalette)
-                    fps = round(1.0 / snapshot.timestamp.delta_seconds)
-                    print(snapshot.timestamp)
-
+                    frame_snapshot = self.collect(sync_mode)
+                    if not frame_snapshot.valid:
+                        continue
+                    # waypoint = random.choice(waypoint.next(1.5))
+                    # self.agent.move_vehicle(waypoint.transform)
+                    print(frame_snapshot.timestamp)
+                    fps = round(1.0 / frame_snapshot.timestamp.delta_seconds)
+                    frame_snapshot.control = self.agent.step_from_pilot()
+                    print(frame_snapshot.control.control)
+                    print(frame_snapshot.control.waypoint)
+                    print(frame_snapshot.control.road_option)
+                    print(frame_snapshot.control.possible_road_options)
+                    self.save(frame_snapshot)
+                    # print(data['timestamp'])
                     # Draw the display.
                     # draw_image(display, rgb_dict['center'])
-                    draw_image(display, rgb_dict['center'])
+                    draw_image(display, frame_snapshot.rgb_dict['center'])
                     # for keyword, image in rgb_dict.items():
                     #     draw_image(display, image)
                     # for keyword, image in seg_dict.items():
@@ -379,16 +454,7 @@ class OfflineGeneratorEnvironment(GameEnvironment):
         finally:
             print('destroying actors.')
             set_world_asynchronous(self.world)
-            for actor in self.actor_list:
-                actor.destroy()
-            for sensor in self.camera_sensor_dict.values():
-                sensor.destroy()
-            for sensor in self.segmentation_sensor_dict.values():
-                sensor.destroy()
-            if self.collision_sensor is not None:
-                self.collision_sensor.destroy()
-            if self.agent is not None:
-                self.agent.destroy()
+            self.destroy()
             pygame.quit()
             print('done.')
 
@@ -515,6 +581,7 @@ class ExperimentArgument:
         self.eval_data_name: str = info_dict['data']['name']
         self.eval_info_name: str = '{}-v{}'.format(self.eval_data_name, info_dict['data']['version'])
         self.camera_keywords: List[str] = ['center']
+        self.use_extra: bool = False
 
         model_keys = ['control', 'stop', 'high', 'single']
         model_suffix = ['model', 'model', 'level', 'model']
