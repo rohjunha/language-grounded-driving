@@ -15,7 +15,7 @@ from custom_carla.agents.navigation.roaming_agent import RoamingAgent
 
 from config import DATASET_FRAMERATE
 from data.types import CarState, CarControl, DriveDataFrame
-from game.common import destroy_actor, get_font, show_game, draw_image
+from game.common import destroy_actor, get_font, show_game, draw_image, FrameSnapshot
 from game.sensors import SegmentationSensor, CameraSensor, CollisionSensor, SensorManager
 from util.common import add_carla_module, get_logger, get_timestamp, set_random_seed
 from util.directory import ExperimentDirectory
@@ -702,7 +702,8 @@ class GameEnvironment:
         self.agent = VehicleWrapper(
             world=self.world,
             transform=self.transforms[self.transform_index],
-            agent_type=self.agent_type,)
+            agent_type=self.agent_type,
+            autopilot=self.autopilot,)
         self.camera_keywords = args.camera_keywords
         self.sensor_manager = SensorManager(self.world, self.vehicle,
                                             args.camera_keywords, args.width, args.height, args.use_extra)
@@ -725,6 +726,10 @@ class GameEnvironment:
         assert self.show_image
         show_game(self.display, self.font, image, clock, road_option, is_intersection, extra_str)
 
+    @property
+    def autopilot(self):
+        return self.agent_type in ['roaming', 'basic']
+
     def run(self) -> None:
         raise NotImplementedError
 
@@ -733,6 +738,16 @@ class GameEnvironment:
             self.agent.destroy()
         if self.sensor_manager is not None:
             self.sensor_manager.destroy()
+
+    def collect(self, sync_mode: CarlaSyncWrapper) -> FrameSnapshot:
+        actor_snapshot = None
+        try:
+            snapshot, rgb_dict, seg_dict = sync_mode.tick(timeout=2.0)
+            if snapshot.has_actor(self.vehicle.id):
+                actor_snapshot = snapshot.find(self.vehicle.id)
+        except:
+            return FrameSnapshot(None, None, dict(), dict())
+        return FrameSnapshot(snapshot.timestamp, actor_snapshot, rgb_dict, seg_dict)
 
 
 def main():

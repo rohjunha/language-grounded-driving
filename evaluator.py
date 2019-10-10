@@ -1024,6 +1024,7 @@ class ExperimentArgument:
         self.eval_data_name: str = info_dict['data']['name']
         self.eval_info_name: str = '{}-v{}'.format(self.eval_data_name, info_dict['data']['version'])
         self.camera_keywords: List[str] = ['center']
+        self.use_extra: bool = True
 
         model_keys = ['control', 'stop', 'high', 'single']
         model_suffix = ['model', 'model', 'level', 'model']

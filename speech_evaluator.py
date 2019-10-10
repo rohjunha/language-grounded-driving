@@ -25,10 +25,11 @@ from moviepy import editor
 from six.moves import queue
 
 from data.types import DriveDataFrame, LengthComputer
-from game.environment import set_world_asynchronous, set_world_synchronous, GameEnvironment
+from game.common import SnapshotSaver
+from game.environment import set_world_asynchronous, set_world_synchronous, GameEnvironment, CarlaSyncWrapper
 from evaluator import ExperimentArgument, load_param_and_evaluator, load_evaluation_dataset, \
     get_random_sentence_from_keyword, listen_keyboard
-from util.common import add_carla_module, get_logger, get_current_time, unique_with_islices
+from util.common import add_carla_module, get_logger, get_current_time, unique_with_islices, get_timestamp
 from util.directory import EvaluationDirectory, mkdir_if_not_exists
 
 add_carla_module()
@@ -834,11 +835,12 @@ def launch_recognizer(language_queue, event, audio_path_func, audio_queue, audio
     event.set()
 
 
-class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
+class SpeechEvaluationEnvironment(GameEnvironment, SnapshotSaver, EvaluationDirectory):
     def __init__(self, eval_keyword: str, language_queue, event, audio_queue, audio_setup_dict, traj_index, args):
         self.eval_keyword = eval_keyword
         args.show_game = True
         GameEnvironment.__init__(self, args=args, agent_type='evaluation')
+        SnapshotSaver.__init__(self, get_timestamp())
 
         self.event = event
         self.language_queue = language_queue
@@ -875,6 +877,24 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
     def eval_info(self):
         return self.control_param.exp_index, self.eval_name, \
                self.control_evaluator.step, 'online'
+
+    def process_segment(self, in_image):
+        return np.reshape(((in_image[:, :, 2] == 7).astype(dtype=np.uint8) * 255), (88, 200, 1))
+
+    def process_custom_segment(self, in_image):
+        return np.reshape(self.deeplab_model.run(in_image), (88, 200, 1))
+
+    def process_image(self, in_image):
+        if self.image_type == 's':
+            return self.process_segment(in_image)
+        elif self.image_type == 'd':
+            return self.process_custom_segment(in_image)
+        elif self.image_type == 'bgr':
+            return in_image
+        elif self.image_type == 'bgrs':
+            return np.concatenate((in_image, self.process_segment(in_image)), axis=-1)
+        elif self.image_type == 'bgrd':
+            return np.concatenate((in_image, self.process_custom_segment(in_image)), axis=-1)
 
     @property
     def segment_image(self):
@@ -1001,121 +1021,130 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
 
         agent_len = LengthComputer()
         stop_buffer = []
-        while not status['exited'] or not status['collided']:
-            keyboard_input = listen_keyboard()
-            updated = False
-            if keyboard_input == 'q':
-                status['exited'] = True
-                self.event.set()
-                logger.info('event was triggered')
-                break
-            elif keyboard_input == 'r':
-                status['restart'] = True
-                logger.info('restarted by the user')
-                return status
-            elif keyboard_input == 's':
-                status['finished'] = True
-                logger.info('finished by the user')
-                break
-
-            if not self.language_queue.empty():
-                updated = True
-                self.sentence = self.language_queue.get()
-                logger.info('sentence was updated: {}'.format(self.sentence))
-                if self.sentence is None:
-                    status['finished'] = True
+        with CarlaSyncWrapper(self.world, self.sensor_manager) as sync_mode:
+            while not status['exited'] or not status['collided']:
+                keyboard_input = listen_keyboard()
+                updated = False
+                if keyboard_input == 'q':
+                    status['exited'] = True
+                    self.event.set()
+                    logger.info('event was triggered')
                     break
-                keyword = 'left'
-                self.eval_keyword = keyword
-                self.control_param.eval_keyword = keyword
-                self.stop_param.eval_keyword = keyword
-                self.high_param.eval_keyword = keyword
-                self.control_evaluator.param = self.control_param
-                self.stop_evaluator.param = self.stop_param
-                self.high_evaluator.cmd = keyword
-                self.high_evaluator.param = self.high_param
-                self.high_evaluator.sentence = keyword.lower()
-                self.control_evaluator.initialize()
-                self.stop_evaluator.initialize()
-                self.high_evaluator.initialize()
-
-            if frame is not None and self.agent.collision_sensor.has_collided(frame):
-                logger.info('collision was detected at frame #{}'.format(frame))
-                status['collided'] = True
-                break
-
-            if count > 50 and agent_len.length < 0.5:
-                logger.info('simulation has a problem in going forward')
-                status['restart'] = True
-                return status
-
-            clock.tick()
-            self.world.tick()
-            try:
-                ts = self.world.wait_for_tick()
-            except RuntimeError as e:
-                logger.error('runtime error: {}'.format(e))
-                status['restart'] = True
-                return status
-
-            if frame is not None:
-                if ts.frame_count != frame + 1:
-                    logger.info('frame skip!')
-            frame = ts.frame_count
-
-            if self.agent.image_frame is None:
-                continue
-            if self.agent.segment_frame is None:
-                continue
-
-            # run high-level evaluator when stopped was triggered by the low-level controller
-            final_image = self.final_image
-            if status['stopped'] or self.control_evaluator.cmd == 3 and updated:
-                sentence = deepcopy(self.sentence)
-                action = self.high_evaluator.run_step(final_image, sentence)
-                action = self.softmax(action)
-                action_index = torch.argmax(action[-1], dim=0).item()
-                location = self.agent.fetch_car_state().transform.location
-                self.high_data_dict[t].append((final_image, {
-                    'sentence': sentence,
-                    'location': (location.x, location.y),
-                    'action_index': action_index}))
-                sub_task = HIGH_LEVEL_COMMAND_NAMES[action_index]
-                # if self.last_sub_task != sub_task:
-                self.last_sub_task = sub_task
-                logger.info('sentence: {}, sub-task: {}'.format(sentence, self.last_sub_task))
-                if action_index < 4:
-                    self.control_evaluator.cmd = action_index
-                    self.stop_evaluator.cmd = action_index
-                    stop_buffer = []
-                else:
-                    logger.info('the task was finished by "finish"')
+                elif keyboard_input == 'r':
+                    status['restart'] = True
+                    logger.info('restarted by the user')
+                    return status
+                elif keyboard_input == 's':
                     status['finished'] = True
+                    logger.info('finished by the user')
                     break
 
-            # run low-level evaluator to apply control and update stopped status
-            if count % EVAL_FRAMERATE_SCALE == 0:
-                control: carla.VehicleControl = self.control_evaluator.run_step(final_image)
-                stop: float = self.stop_evaluator.run_step(final_image)
-                sub_goal = fetch_high_level_command_from_index(self.control_evaluator.cmd).lower()
-                logger.info('{} {:+6.4f}'.format(sub_goal, stop))
-                # logger.info('throttle {:+6.4f}, steer {:+6.4f}, delayed {}, current {:d}, stop {:+6.4f}'.
-                #             format(control.throttle, control.steer, frame - self.agent.image_frame_number, action_index,
-                #                    stop))
-                self.agent.step_from_control(frame, control)
-                self.agent.save_stop(frame, stop, sub_goal)
-                self.agent.save_cmd(frame, self.sentence)
-                agent_len(self.agent.data_frame_dict[self.agent.data_frame_number].state.transform.location)
-                stop_buffer.append(stop)
-                recent_buffer = stop_buffer[-3:]
-                status['stopped'] = len(recent_buffer) > 2 and sum(list(map(lambda x: x > 0.0, recent_buffer))) > 1
+                if not self.language_queue.empty():
+                    updated = True
+                    self.sentence = self.language_queue.get()
+                    logger.info('sentence was updated: {}'.format(self.sentence))
+                    if self.sentence is None:
+                        status['finished'] = True
+                        break
+                    keyword = 'left'
+                    self.eval_keyword = keyword
+                    self.control_param.eval_keyword = keyword
+                    self.stop_param.eval_keyword = keyword
+                    self.high_param.eval_keyword = keyword
+                    self.control_evaluator.param = self.control_param
+                    self.stop_evaluator.param = self.stop_param
+                    self.high_evaluator.cmd = keyword
+                    self.high_evaluator.param = self.high_param
+                    self.high_evaluator.sentence = keyword.lower()
+                    self.control_evaluator.initialize()
+                    self.stop_evaluator.initialize()
+                    self.high_evaluator.initialize()
 
-            if self.show_image and self.agent.image_frame is not None:
-                self.show(self.agent.image_frame, clock, extra_str=self.sentence)
+                if frame is not None and self.agent.collision_sensor.has_collided(frame):
+                    logger.info('collision was detected at frame #{}'.format(frame))
+                    status['collided'] = True
+                    break
 
-            self.final_images.append(final_image)
+                if count > 50 and agent_len.length < 0.5:
+                    logger.info('simulation has a problem in going forward')
+                    status['restart'] = True
+                    return status
 
-            count += 1
+                clock.tick()
+                frame_snapshot = self.collect(sync_mode)
+                if not frame_snapshot.valid:
+                    continue
+
+                # self.world.tick()
+                # try:
+                #     ts = self.world.wait_for_tick()
+                # except RuntimeError as e:
+                #     logger.error('runtime error: {}'.format(e))
+                #     status['restart'] = True
+                #     return status
+
+                # if frame is not None:
+                #     if ts.frame_count != frame + 1:
+                #         logger.info('frame skip!')
+                # frame = ts.frame_count
+                #
+                # if self.agent.image_frame is None:
+                #     continue
+                # if self.agent.segment_frame is None:
+                #     continue
+
+                # run high-level evaluator when stopped was triggered by the low-level controller
+                # final_image = self.final_image
+                final_image = self.process_image(frame_snapshot.rgb_dict['center'])
+                print(final_image.shape)
+                if status['stopped'] or self.control_evaluator.cmd == 3 and updated:
+                    sentence = deepcopy(self.sentence)
+                    action = self.high_evaluator.run_step(final_image, sentence)
+                    action = self.softmax(action)
+                    action_index = torch.argmax(action[-1], dim=0).item()
+                    location = frame_snapshot.car_state.transform.location
+                    self.high_data_dict[t].append((final_image, {
+                        'sentence': sentence,
+                        'location': (location.x, location.y),
+                        'action_index': action_index}))
+                    sub_task = HIGH_LEVEL_COMMAND_NAMES[action_index]
+                    # if self.last_sub_task != sub_task:
+                    self.last_sub_task = sub_task
+                    logger.info('sentence: {}, sub-task: {}'.format(sentence, self.last_sub_task))
+                    if action_index < 4:
+                        self.control_evaluator.cmd = action_index
+                        self.stop_evaluator.cmd = action_index
+                        stop_buffer = []
+                    else:
+                        logger.info('the task was finished by "finish"')
+                        status['finished'] = True
+                        break
+
+                # run low-level evaluator to apply control and update stopped status
+                if count % EVAL_FRAMERATE_SCALE == 0:
+                    frame_snapshot.control = self.control_evaluator.run_step(final_image)
+                    stop: float = self.stop_evaluator.run_step(final_image)
+                    sub_goal = fetch_high_level_command_from_index(self.control_evaluator.cmd).lower()
+                    logger.info('{} {:+6.4f}'.format(sub_goal, stop))
+                    # logger.info('throttle {:+6.4f}, steer {:+6.4f}, delayed {}, current {:d}, stop {:+6.4f}'.
+                    #             format(control.throttle, control.steer, frame - self.agent.image_frame_number, action_index,
+                    #                    stop))
+                    self.agent.step_from_control(frame_snapshot.control)
+                    # self.agent.save_stop(frame, stop, sub_goal)
+                    # self.agent.save_cmd(frame, self.sentence)
+                    # agent_len(self.agent.data_frame_dict[self.agent.data_frame_number].state.transform.location)
+                    agent_len(frame_snapshot.car_state.transform.location)
+                    stop_buffer.append(stop)
+                    recent_buffer = stop_buffer[-3:]
+                    status['stopped'] = len(recent_buffer) > 2 and sum(list(map(lambda x: x > 0.0, recent_buffer))) > 1
+                    self.save(frame_snapshot)
+
+                if self.show_image:
+                    self.show(frame_snapshot.rgb_dict['center'], clock, extra_str=self.sentence)
+
+                self.final_images.append(final_image)
+
+                count += 1
 
         self.audio_queue.put({
             'timestamp': get_current_time(),
@@ -1404,8 +1433,8 @@ def generate_video_from_replay(directory):
 
 
 if __name__ == '__main__':
-    directory = EvaluationDirectory(40, 'ls-town2', 72500, 'online')
+    # directory = EvaluationDirectory(40, 'ls-town2', 72500, 'online')
     # generate_video_with_audio(directory, 7, True)
-    generate_canonical_data_structure(directory, 7, True)
+    # generate_canonical_data_structure(directory, 7, True)
     # generate_video_from_replay(directory)
-    # main()
+    main()
