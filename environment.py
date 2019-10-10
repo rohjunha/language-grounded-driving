@@ -201,8 +201,7 @@ class CarlaSyncWrapper:
             self,
             world: carla.World,
             camera_sensor_dict: dict,
-            segmentation_sensor_dict: dict,
-            **kwargs):
+            segmentation_sensor_dict: dict):
         self.world = world
         self.delta_seconds = 1.0 / DATASET_FRAMERATE
         self.settings = self.world.get_settings()
@@ -254,6 +253,68 @@ class CarlaSyncWrapper:
             data = sensor_queue.get(timeout=timeout)
             if data.frame == self.frame:
                 return data
+
+
+class VehicleWrapper:
+    def __init__(
+            self,
+            world,
+            transform: carla.Transform,
+            agent_type: str = 'roaming',
+            speed: float = 20.0,
+            safe: bool = True,
+            autopilot: bool = True):
+        self.world = world
+        self.agent_type = agent_type
+        self.safe = safe
+        self.speed = speed
+        self.autopilot = autopilot
+        self.vehicle = None
+        self.agent = None
+        self._set_vehicle(transform)
+        if self.autopilot:
+            self._set_agent()
+
+    def _set_agent(self):
+        if self.vehicle is None:
+            raise ValueError('vehicle is not assigned')
+        if self.agent_type == 'roaming':
+            self.agent = RoamingAgent(self.vehicle, self.speed)
+        elif self.agent_type == 'basic':
+            self.agent = BasicAgent(self.vehicle, self.speed)
+        else:
+            raise TypeError('invalid agent type: {}'.format(self.agent_type))
+
+    def _set_vehicle(self, transform):
+        blueprints = self.world.get_blueprint_library().filter('vehicle.audi.a2')
+        if self.safe:
+            blueprints = [x for x in blueprints if int(x.get_attribute('number_of_wheels')) == 4]
+            blueprints = [x for x in blueprints if not x.id.endswith('isetta')]
+            blueprints = [x for x in blueprints if not x.id.endswith('carlacola')]
+
+        if self.vehicle is not None:
+            return
+
+        blueprint_vehicle = random.choice(blueprints)
+        blueprint_vehicle.set_attribute('role_name', 'hero')
+        if blueprint_vehicle.has_attribute('color'):
+            color = random.choice(blueprint_vehicle.get_attribute('color').recommended_values)
+            blueprint_vehicle.set_attribute('color', color)
+        blueprint_vehicle.set_attribute('role_name', 'autopilot')
+
+        while self.vehicle is None:
+            self.vehicle = self.world.try_spawn_actor(blueprint_vehicle, transform)
+        self.vehicle.set_autopilot(False)
+
+    def move_vehicle(self, transform: carla.Transform):
+        transform.location.z += 0.1
+        self.vehicle.set_simulate_physics(False)
+        self.vehicle.set_transform(transform)
+        self.vehicle.set_simulate_physics(True)
+
+    def set_destination(self, src, dst):
+        if self.agent is not None and dst is not None:
+            self.agent.set_destination(src, dst)
 
 
 class SynchronousAgent(ExperimentDirectory):
