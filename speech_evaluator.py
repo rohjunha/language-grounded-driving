@@ -16,7 +16,7 @@ from operator import attrgetter, itemgetter
 from pathlib import Path
 from subprocess import run
 from time import sleep
-from typing import Dict, Tuple, List
+from typing import Dict, List
 from PIL import Image, ImageDraw, ImageFont
 
 import cv2
@@ -25,7 +25,7 @@ from moviepy import editor
 from six.moves import queue
 
 from data.types import DriveDataFrame, LengthComputer
-from environment import set_world_asynchronous, set_world_synchronous, GameEnvironment
+from game.environment import set_world_asynchronous, set_world_synchronous, GameEnvironment
 from evaluator import ExperimentArgument, load_param_and_evaluator, load_evaluation_dataset, \
     get_random_sentence_from_keyword, listen_keyboard
 from util.common import add_carla_module, get_logger, get_current_time, unique_with_islices

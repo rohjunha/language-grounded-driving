@@ -5,19 +5,17 @@ from math import sqrt
 from operator import attrgetter
 from pathlib import Path
 from time import sleep
-from typing import List, Any, Dict
+from typing import List, Dict
 
-import cv2
 import numpy as np
 import pygame
 
-from data.types import DriveDataFrame, CarState
-from environment import GameEnvironment, set_world_asynchronous, set_world_synchronous
-from evaluator import load_param_and_evaluator, load_evaluation_dataset, listen_keyboard, ExperimentArgument
+from data.types import DriveDataFrame
+from game.environment import GameEnvironment, set_world_asynchronous, set_world_synchronous
+from evaluator import listen_keyboard, ExperimentArgument
 from speech_evaluator import generate_video_with_audio
 from util.common import get_logger, add_carla_module
 from util.directory import EvaluationDirectory
-from util.image import video_from_files
 from util.serialize import list_from_vector
 
 add_carla_module()

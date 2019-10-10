@@ -15,8 +15,8 @@ from custom_carla.agents.navigation.roaming_agent import RoamingAgent
 
 from config import DATASET_FRAMERATE
 from data.types import CarState, CarControl, DriveDataFrame
-from game.common import destroy_actor
-from game.sensors import set_all_sensors
+from game.common import destroy_actor, get_font
+from game.sensors import set_all_sensors, SegmentationSensor, CameraSensor, CollisionSensor
 from util.common import add_carla_module, get_logger, get_timestamp, set_random_seed
 from util.directory import ExperimentDirectory
 from util.serialize import str_from_waypoint
@@ -77,14 +77,6 @@ def draw_image(surface, image, blend=False):
     if blend:
         image_surface.set_alpha(100)
     surface.blit(image_surface, (0, 0))
-
-
-def get_font():
-    fonts = [x for x in pygame.font.get_fonts()]
-    default_font = 'ubuntumono'
-    font = default_font if default_font in fonts else fonts[0]
-    font = pygame.font.match_font(font)
-    return pygame.font.Font(font, 14)
 
 
 def should_quit():
@@ -197,6 +189,9 @@ def numpy_from_carla_image(carla_image: carla.Image) -> np.ndarray:
 
 
 class CarlaSyncWrapper:
+    """
+    CarlaSyncWrapper handles data for each frame from the synchronous carla world
+    """
     def __init__(
             self,
             world: carla.World,
@@ -275,6 +270,16 @@ class VehicleWrapper:
         if self.autopilot:
             self._set_agent()
 
+    def reset(self):
+        control = carla.VehicleControl()
+        control.steer = 0.0
+        control.throttle = 0.0
+        control.brake = 1.0
+        self.vehicle.apply_control(control)
+
+    def destroy(self):
+        self.vehicle.destroy()
+
     def _set_agent(self):
         if self.vehicle is None:
             raise ValueError('vehicle is not assigned')
@@ -315,6 +320,35 @@ class VehicleWrapper:
     def set_destination(self, src, dst):
         if self.agent is not None and dst is not None:
             self.agent.set_destination(src, dst)
+
+    @property
+    def route(self):
+        if not self.autopilot:
+            raise ValueError('autopilot was not set')
+        return self.agent._route
+
+    def step_from_pilot(self, inject: float = 0.0) -> ControlWithInfo:
+        control_with_info: ControlWithInfo = self.agent.run_step(debug=False)
+        vehicle_control: carla.VehicleControl = control_with_info.control
+        vehicle_control.manual_gear_shift = False
+        vehicle_control.steer += inject
+        self.vehicle.apply_control(vehicle_control)
+        return control_with_info
+
+    def step_from_control(self, vehicle_control: carla.VehicleControl) -> None:
+        throttle_value = vehicle_control.throttle
+        vehicle_control.manual_gear_shift = False
+        if throttle_value < 0.4:
+            vehicle_control.throttle = 0.4  # avoid stopping
+        self.vehicle.apply_control(vehicle_control)
+
+        # # todo: implement PID controller
+        # if self.data_frame_number is not None and self.data_frame_number in self.data_frame_dict:
+        #     velocity = self.data_frame_dict[self.data_frame_number].state.velocity
+        #     speed = 3.6 * math.sqrt(velocity.x ** 2 + velocity.y ** 2 + velocity.z ** 2)
+        #     # logger.info('speed {:+5.3f}'.format(speed))
+        #     if speed > 20:
+        #         vehicle_control.throttle = 0.0
 
 
 class SynchronousAgent(ExperimentDirectory):
@@ -698,6 +732,12 @@ class GameEnvironment:
         set_world_asynchronous(self.world)
         clean_vehicles(self.world)
         set_traffic_lights_green(self.world)
+        self.agent = VehicleWrapper(
+            world=self.world,
+            transform=self.transforms[self.transform_index],
+            agent_type=self.agent_type,)
+        set_world_synchronous(self.world)
+
         # self.agent = SynchronousAgent(
         #     world=self.world,
         #     args=self.args,
@@ -706,6 +746,10 @@ class GameEnvironment:
         #     render_image=self.render_image,
         #     evaluation=self.evaluation)
         assert self.world.get_settings().synchronous_mode
+
+    @property
+    def vehicle(self):
+        return self.agent.vehicle
 
     @property
     def transform_index(self):

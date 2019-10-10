@@ -18,18 +18,25 @@
 # from data.storage import DataStorage
 # from data.types import DriveDataFrame, LengthComputer
 # from environment import set_world_asynchronous, set_world_synchronous, should_quit, FrameCounter, GameEnvironment
+import random
 from time import sleep
 from typing import List
 
-from environment import GameEnvironment, set_world_asynchronous, set_world_synchronous, should_quit, FrameCounter
+
+
+from game.common import get_font
+from game.environment import GameEnvironment, set_world_asynchronous, set_world_synchronous, should_quit, FrameCounter, \
+    CarlaSyncWrapper, draw_image
 # from evaluator import LowLevelEvaluator
 # from parameter import Parameter
+from game.sensors import set_all_sensors
 from util.common import add_carla_module, get_logger, fetch_ip_address
 # from util.directory import fetch_dataset_dir
 # from util.road_option import fetch_index_from_road_option, fetch_name_from_road_option
 #
 logger = get_logger(__name__)
 add_carla_module()
+import carla
 # import pygame
 #
 #
@@ -297,7 +304,10 @@ add_carla_module()
 class OfflineGeneratorEnvironment(GameEnvironment):
     def __init__(self, args):
         GameEnvironment.__init__(self, args=args, agent_type='roaming', transform_index=0)
-        # self.injector = NoiseInjector(Parameter())
+        self.actor_list = []
+        self.collision_sensor = None
+        self.camera_sensor_dict = dict()
+        self.segmentation_sensor_dict = dict()
 
     def run(self):
         import pygame
@@ -305,8 +315,23 @@ class OfflineGeneratorEnvironment(GameEnvironment):
             raise ValueError('world was not initialized')
         if self.agent is None:
             raise ValueError('agent was not initialized')
+        pygame.init()
+
+        display = pygame.display.set_mode(
+            (200, 88),
+            pygame.HWSURFACE | pygame.DOUBLEBUF)
+        font = get_font()
+        clock = pygame.time.Clock()
 
         try:
+            map = self.world.get_map()
+            start_pose = random.choice(map.get_spawn_points())
+            waypoint = map.get_waypoint(start_pose.location)
+
+            self.camera_sensor_dict, self.segmentation_sensor_dict, self.collision_sensor = set_all_sensors(
+                self.world, self.agent.vehicle, ['right', 'center', 'left'], 200, 88, False)
+            print(self.agent.vehicle.id)
+
             frame = None
             count = 0
             clock = pygame.time.Clock() if self.show_image else FrameCounter()
@@ -318,53 +343,103 @@ class OfflineGeneratorEnvironment(GameEnvironment):
             waypoint_dict = dict()
             road_option_dict = dict()
 
-            while count < 200000:
-                if self.show_image and should_quit():
-                    break
+            with CarlaSyncWrapper(self.world, self.camera_sensor_dict, self.segmentation_sensor_dict) as sync_mode:
+                while True:
+                    if should_quit():
+                        return
+                    clock.tick()
 
-                if frame is not None and self.agent.collision_sensor.has_collided(frame):
-                    logger.info('collision was detected at frame #{}'.format(frame))
-                    set_world_asynchronous(self.world)
-                    self.transform_index += 1
-                    self.agent.move_vehicle(self.transforms[self.transform_index])
-                    sleep(0.5)
-                    self.agent.agent.reset_planner()
-                    set_world_synchronous(self.world)
+                    snapshot, rgb_dict, seg_dict = sync_mode.tick(timeout=2.0)
+                    # if snapshot.has_actor(vehicle.id):
+                    #     actor_snapshot = snapshot.find(vehicle.id)
+                    #     print(actor_snapshot.get_transform())
 
-                clock.tick()
-                ts = self.world.tick()
-                if frame is not None:
-                    if ts.frame_count != frame + 1:
-                        logger.info('frame skip!')
-                frame = ts.frame_count
-                # self.injector.step()
+                    # Choose the next waypoint and update the car location.
+                    waypoint = random.choice(waypoint.next(1.5))
+                    self.agent.move_vehicle(waypoint.transform)
+                    for keyword in seg_dict.keys():
+                        seg_dict[keyword].convert(carla.ColorConverter.CityScapesPalette)
+                    fps = round(1.0 / snapshot.timestamp.delta_seconds)
+                    print(snapshot.timestamp)
 
-                if len(self.agent.data_frame_buffer) > 100:
-                    self.agent.export_data()
-                    if not self.show_image:
-                        print(str(clock))
-
-                if self.agent.image_frame is None:
-                    continue
-
-                waypoint, road_option, _ = self.agent.step_from_pilot(
-                    frame, update=True, apply=True, inject=0.0)
-                waypoint_dict[frame] = waypoint
-                road_option_dict[frame] = road_option
-                if self.show_image:
-                    image = self.agent.image_frame
-                    image_frame_number = self.agent.image_frame_number
-                    image_road_option = road_option_dict[image_frame_number] if image_frame_number in road_option_dict else None
-                    image_waypoint = waypoint_dict[image_frame_number] if image_frame_number in waypoint_dict else None
-                    self.show(image, clock, image_road_option, image_waypoint.is_intersection if image_waypoint is not None else None)
-
-                count += 1
-            self.agent.export_data()
-
+                    # Draw the display.
+                    # draw_image(display, rgb_dict['center'])
+                    draw_image(display, rgb_dict['center'])
+                    # for keyword, image in rgb_dict.items():
+                    #     draw_image(display, image)
+                    # for keyword, image in seg_dict.items():
+                    #     draw_image(display, image, blend=True)
+                    display.blit(
+                        font.render('% 5d FPS (real)' % clock.get_fps(), True, (255, 255, 255)),
+                        (8, 10))
+                    display.blit(
+                        font.render('% 5d FPS (simulated)' % fps, True, (255, 255, 255)),
+                        (8, 28))
+                    pygame.display.flip()
         finally:
+            print('destroying actors.')
             set_world_asynchronous(self.world)
+            for actor in self.actor_list:
+                actor.destroy()
+            for sensor in self.camera_sensor_dict.values():
+                sensor.destroy()
+            for sensor in self.segmentation_sensor_dict.values():
+                sensor.destroy()
+            if self.collision_sensor is not None:
+                self.collision_sensor.destroy()
             if self.agent is not None:
                 self.agent.destroy()
+            pygame.quit()
+            print('done.')
+
+            #
+            # while count < 200000:
+            #     if self.show_image and should_quit():
+            #         break
+            #
+            #     if frame is not None and self.agent.collision_sensor.has_collided(frame):
+            #         logger.info('collision was detected at frame #{}'.format(frame))
+            #         set_world_asynchronous(self.world)
+            #         self.transform_index += 1
+            #         self.agent.move_vehicle(self.transforms[self.transform_index])
+            #         sleep(0.5)
+            #         self.agent.agent.reset_planner()
+            #         set_world_synchronous(self.world)
+            #
+            #     clock.tick()
+            #     frame = self.world.tick()
+            #     print(frame)
+            #     # if frame is not None:
+            #     #     if ts.frame_count != frame + 1:
+            #     #         logger.info('frame skip!')
+            #     # frame = ts.frame_count
+            #     # self.injector.step()
+            #
+            #     if len(self.agent.data_frame_buffer) > 100:
+            #         self.agent.export_data()
+            #         if not self.show_image:
+            #             print(str(clock))
+            #
+            #     if self.agent.image_frame is None:
+            #         continue
+            #
+            #     waypoint, road_option, _ = self.agent.step_from_pilot(
+            #         frame, update=True, apply=True, inject=0.0)
+            #     waypoint_dict[frame] = waypoint
+            #     road_option_dict[frame] = road_option
+            #     if self.show_image:
+            #         image = self.agent.image_frame
+            #         image_frame_number = self.agent.image_frame_number
+            #         image_road_option = road_option_dict[image_frame_number] if image_frame_number in road_option_dict else None
+            #         image_waypoint = waypoint_dict[image_frame_number] if image_frame_number in waypoint_dict else None
+            #         self.show(image, clock, image_road_option, image_waypoint.is_intersection if image_waypoint is not None else None)
+            #
+            #     count += 1
+            # self.agent.export_data()
+
+        # finally:
+            # if self.agent is not None:
+            #     self.agent.destroy()
 
 
 # def main():

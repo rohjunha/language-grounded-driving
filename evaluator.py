@@ -21,7 +21,7 @@ import cv2
 
 from custom_carla.agents.navigation.local_planner import RoadOption
 from data.types import DriveDataFrame, LengthComputer
-from environment import set_world_asynchronous, set_world_synchronous, FrameCounter, should_quit, GameEnvironment
+from game.environment import set_world_asynchronous, set_world_synchronous, FrameCounter, should_quit, GameEnvironment
 from util.common import add_carla_module, get_logger, fetch_ip_address
 from util.directory import EvaluationDirectory, mkdir_if_not_exists
 
