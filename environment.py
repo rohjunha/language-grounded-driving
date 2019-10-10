@@ -1,8 +1,7 @@
 import json
 import math
+import queue
 import random
-import weakref
-from collections import defaultdict
 from functools import partial
 from operator import attrgetter
 from time import perf_counter
@@ -14,9 +13,11 @@ from custom_carla.agents.navigation.basic_agent import BasicAgent
 from custom_carla.agents.navigation.local_planner import RoadOption
 from custom_carla.agents.navigation.roaming_agent import RoamingAgent
 
-from config import EVAL_FRAMERATE_SCALE, DATASET_FRAMERATE, CAMERA_KEYWORDS
+from config import DATASET_FRAMERATE
 from data.types import CarState, CarControl, DriveDataFrame
-from util.common import add_carla_module, get_logger, get_timestamp, set_random_seed, get_current_time
+from game.common import destroy_actor
+from game.sensors import set_all_sensors
+from util.common import add_carla_module, get_logger, get_timestamp, set_random_seed
 from util.directory import ExperimentDirectory
 from util.serialize import str_from_waypoint
 
@@ -31,11 +32,6 @@ SpawnActor = carla.command.SpawnActor
 SetAutopilot = carla.command.SetAutopilot
 FutureActor = carla.command.FutureActor
 DestroyActor = carla.command.DestroyActor
-
-
-def destroy_actor(actor):
-    if actor is not None and actor.is_alive:
-        actor.destroy()
 
 
 class FrameCounter:
@@ -66,9 +62,20 @@ class FrameCounter:
         return 'count: {:5d}, fps: {:4.2f}'.format(self.counter, self.framerate)
 
 
-def draw_image(surface, image: np.ndarray):
-    array = image[:, :, ::-1]
+# def draw_image(surface, image: np.ndarray):
+#     array = image[:, :, ::-1]
+#     image_surface = pygame.surfarray.make_surface(array.swapaxes(0, 1))
+#     surface.blit(image_surface, (0, 0))
+
+
+def draw_image(surface, image, blend=False):
+    array = np.frombuffer(image.raw_data, dtype=np.dtype('uint8'))
+    array = np.reshape(array, (image.height, image.width, 4))
+    array = array[:, :, :3]
+    array = array[:, :, ::-1]
     image_surface = pygame.surfarray.make_surface(array.swapaxes(0, 1))
+    if blend:
+        image_surface.set_alpha(100)
     surface.blit(image_surface, (0, 0))
 
 
@@ -142,6 +149,7 @@ def set_world_synchronous(world: carla.World):
     settings = world.get_settings()
     if not settings.synchronous_mode:
         settings.synchronous_mode = True
+        settings.fixed_delta_seconds = 1 / DATASET_FRAMERATE
         world.apply_settings(settings)
 
 
@@ -182,136 +190,70 @@ def get_actor_display_name(actor, truncate=250):
     return (name[:truncate - 1] + u'\u2026') if len(name) > truncate else name
 
 
-class SensorBase:
-    def __init__(self, parent_actor):
-        self.sensor = None
-        self._parent = parent_actor
-        self.world = self._parent.get_world()
-        self.sensor = self.generate_sensor()
-
-    def generate_sensor(self):
-        raise NotImplementedError
-
-    def destroy(self):
-        destroy_actor(self.sensor)
-
-    def __del__(self):
-        self.destroy()
-
-
-class CollisionSensor(SensorBase):
-    def __init__(self, parent_actor):
-        SensorBase.__init__(self, parent_actor)
-        self.history = defaultdict(int)
-        weak_self = weakref.ref(self)
-        self.sensor.listen(lambda event: CollisionSensor.on_collision(weak_self, event))
-
-    def generate_sensor(self):
-        bp = self.world.get_blueprint_library().find('sensor.other.collision')
-        return self.world.spawn_actor(bp, carla.Transform(), attach_to=self._parent)
-
-    def has_collided(self, frame_number: int) -> bool:
-        return self.history[frame_number] > 0
-
-    @staticmethod
-    def on_collision(weak_self, event):
-        self = weak_self()
-        if not self:
-            return
-        # actor_type = get_actor_display_name(event.other_actor)
-        impulse = event.normal_impulse
-        intensity = math.sqrt(impulse.x ** 2 + impulse.y ** 2 + impulse.z ** 2)
-        self.history[event.frame_number] += intensity
-
-
 def numpy_from_carla_image(carla_image: carla.Image) -> np.ndarray:
     np_image = np.frombuffer(carla_image.raw_data, dtype=np.uint8).reshape(carla_image.height, carla_image.width, 4)
     rgb_image = cv2.cvtColor(np_image, cv2.COLOR_RGBA2RGB)
     return rgb_image
 
 
-CAMERA_SHIFT = 0.4
-__camera_transforms__ = {
-    'center': carla.Transform(carla.Location(x=1.6, z=1.7)),
-    'left': carla.Transform(
-        carla.Location(x=1.6, y=-CAMERA_SHIFT, z=1.7),
-        carla.Rotation(yaw=math.atan2(-CAMERA_SHIFT, 1.6) * 180 / math.pi)),
-    'right': carla.Transform(
-        carla.Location(x=1.6, y=+CAMERA_SHIFT, z=1.7),
-        carla.Rotation(yaw=math.atan2(CAMERA_SHIFT, 1.6) * 180 / math.pi)),
-    'extra': carla.Transform(carla.Location(x=1.6, z=1.7))
-}
-for key in __camera_transforms__.keys():
-    assert key in CAMERA_KEYWORDS
-for key in CAMERA_KEYWORDS:
-    assert key in __camera_transforms__
+class CarlaSyncWrapper:
+    def __init__(
+            self,
+            world: carla.World,
+            camera_sensor_dict: dict,
+            segmentation_sensor_dict: dict,
+            **kwargs):
+        self.world = world
+        self.delta_seconds = 1.0 / DATASET_FRAMERATE
+        self.settings = self.world.get_settings()
+        self.camera_sensor_dict = camera_sensor_dict
+        self.segmentation_sensor_dict = segmentation_sensor_dict
+        self.world_queue = None
+        self.camera_queue_dict = dict()
+        self.segmentation_queue_dict = dict()
+        self.frame = None
 
+    def __enter__(self):
+        self.settings = self.world.get_settings()
+        self.frame = self.world.apply_settings(carla.WorldSettings(
+            no_rendering_mode=False,
+            synchronous_mode=True,
+            fixed_delta_seconds=self.delta_seconds))
 
-class CameraSensor(SensorBase):
-    def __init__(self, parent_actor, image_path_func, timing_dict, transform_dict, width, height, camera_keyword: str):
-        self.width = width
-        self.height = height
-        self.camera_keyword = camera_keyword
-        SensorBase.__init__(self, parent_actor)
-        self.image_path_func = image_path_func
-        self.image_frame_number = None
-        self.image_frame = None
-        self.timing_dict = timing_dict
-        self.transform_dict = transform_dict
-        weak_self = weakref.ref(self)
-        self.sensor.listen(lambda image: CameraSensor.on_listen(weak_self, image))
+        def make_queue(register_event):
+            q = queue.Queue()
+            register_event(q.put)
+            return q
 
-    def generate_sensor(self):
-        bp = self.world.get_blueprint_library().find('sensor.camera.rgb')
-        bp.set_attribute('image_size_x', str(self.width))
-        bp.set_attribute('image_size_y', str(self.height))
-        bp.set_attribute('sensor_tick', str(1 / (DATASET_FRAMERATE * EVAL_FRAMERATE_SCALE)))
-        return self.world.spawn_actor(bp, __camera_transforms__[self.camera_keyword], attach_to=self._parent)
+        def make_queue_dict(target_dict, keyword, register_event):
+            q = queue.Queue()
+            register_event(q.put)
+            target_dict[keyword] = q
 
-    @staticmethod
-    def on_listen(weak_self, carla_image: carla.Image):
-        self = weak_self()
-        if not self:
-            return
-        frame_number = carla_image.frame_number
-        self.timing_dict[frame_number] = get_current_time()
-        self.transform_dict[frame_number] = self.sensor.get_transform()
-        self.image_frame_number = frame_number
-        numpy_image = numpy_from_carla_image(carla_image)
-        self.image_frame = numpy_image
-        # print(frame_number, self.image_frame.shape, self.image_path_func(frame_number))
-        cv2.imwrite(str(self.image_path_func(frame_number)), numpy_image)
+        self.world_queue = make_queue(self.world.on_tick)
+        for keyword, sensor in self.camera_sensor_dict.items():
+            make_queue_dict(self.camera_queue_dict, keyword, sensor.listen)
+        for keyword, sensor in self.segmentation_sensor_dict.items():
+            make_queue_dict(self.segmentation_queue_dict, keyword, sensor.listen)
+        return self
 
+    def tick(self, timeout):
+        self.frame = self.world.tick()
+        world_data = self.retrieve_data(self.world_queue, timeout)
+        camera_data_dict = {k: self.retrieve_data(q, timeout) for k, q in self.camera_queue_dict.items()}
+        segmentation_data_dict = {k: self.retrieve_data(q, timeout) for k, q in self.segmentation_queue_dict.items()}
+        assert all(x.frame == self.frame for x in camera_data_dict.values())
+        assert all(x.frame == self.frame for x in segmentation_data_dict.values())
+        return world_data, camera_data_dict, segmentation_data_dict
 
-class SegmentationSensor(SensorBase):
-    def __init__(self, parent_actor, image_path_func, width, height, camera_keyword: str):
-        self.width = width
-        self.height = height
-        self.camera_keyword = camera_keyword
-        SensorBase.__init__(self, parent_actor)
-        self.image_path_func = image_path_func
-        self.image_frame_number = None
-        self.image_frame = None
-        weak_self = weakref.ref(self)
-        self.sensor.listen(lambda image: SegmentationSensor.on_listen(weak_self, image))
+    def __exit__(self, *args, **kwargs):
+        self.world.apply_settings(self.settings)
 
-    def generate_sensor(self):
-        bp = self.world.get_blueprint_library().find('sensor.camera.semantic_segmentation')
-        bp.set_attribute('image_size_x', str(self.width))
-        bp.set_attribute('image_size_y', str(self.height))
-        bp.set_attribute('sensor_tick', str(1 / (DATASET_FRAMERATE * EVAL_FRAMERATE_SCALE)))
-        return self.world.spawn_actor(bp, __camera_transforms__[self.camera_keyword], attach_to=self._parent)
-
-    @staticmethod
-    def on_listen(weak_self, carla_image: carla.Image):
-        self = weak_self()
-        if not self:
-            return
-        frame_number = carla_image.frame_number
-        self.image_frame_number = frame_number
-        numpy_image = numpy_from_carla_image(carla_image)
-        self.image_frame = numpy_image
-        cv2.imwrite(str(self.image_path_func(frame_number)), numpy_image)
+    def retrieve_data(self, sensor_queue, timeout):
+        while True:
+            data = sensor_queue.get(timeout=timeout)
+            if data.frame == self.frame:
+                return data
 
 
 class SynchronousAgent(ExperimentDirectory):
@@ -681,7 +623,7 @@ class GameEnvironment:
         self.show_image = args.show_game if self.render_image else False
 
         self.client = carla.Client(args.host, args.port)
-        self.client.set_timeout(4.0)
+        self.client.set_timeout(2.0)
         self.world = self.client.get_world()
         self.transforms = self.world.get_map().get_spawn_points()
         random.shuffle(self.transforms)
@@ -695,13 +637,13 @@ class GameEnvironment:
         set_world_asynchronous(self.world)
         clean_vehicles(self.world)
         set_traffic_lights_green(self.world)
-        self.agent = SynchronousAgent(
-            world=self.world,
-            args=self.args,
-            transform=self.transforms[self.transform_index],
-            agent_type=self.agent_type,
-            render_image=self.render_image,
-            evaluation=self.evaluation)
+        # self.agent = SynchronousAgent(
+        #     world=self.world,
+        #     args=self.args,
+        #     transform=self.transforms[self.transform_index],
+        #     agent_type=self.agent_type,
+        #     render_image=self.render_image,
+        #     evaluation=self.evaluation)
         assert self.world.get_settings().synchronous_mode
 
     @property
@@ -718,3 +660,89 @@ class GameEnvironment:
 
     def run(self) -> None:
         raise NotImplementedError
+
+
+def main():
+    actor_list = []
+    pygame.init()
+
+    display = pygame.display.set_mode(
+        (200, 88),
+        pygame.HWSURFACE | pygame.DOUBLEBUF)
+    font = get_font()
+    clock = pygame.time.Clock()
+
+    client = carla.Client('localhost', 2000)
+    client.set_timeout(2.0)
+    world = client.get_world()
+
+    collision_sensor = None
+    camera_sensor_dict = dict()
+    segmentation_sensor_dict = dict()
+    try:
+        m = world.get_map()
+        start_pose = random.choice(m.get_spawn_points())
+        waypoint = m.get_waypoint(start_pose.location)
+
+        blueprint_library = world.get_blueprint_library()
+
+        vehicle = world.spawn_actor(
+            random.choice(blueprint_library.filter('vehicle.*')),
+            start_pose)
+        actor_list.append(vehicle)
+        vehicle.set_simulate_physics(False)
+
+        camera_sensor_dict, segmentation_sensor_dict, collision_sensor = set_all_sensors(
+            world, vehicle, ['right', 'center', 'left'], 200, 88, False)
+        print(vehicle.id)
+        with CarlaSyncWrapper(world, camera_sensor_dict, segmentation_sensor_dict) as sync_mode:
+            while True:
+                if should_quit():
+                    return
+                clock.tick()
+
+                snapshot, rgb_dict, seg_dict = sync_mode.tick(timeout=2.0)
+                # if snapshot.has_actor(vehicle.id):
+                #     actor_snapshot = snapshot.find(vehicle.id)
+                #     print(actor_snapshot.get_transform())
+
+                # Choose the next waypoint and update the car location.
+                waypoint = random.choice(waypoint.next(1.5))
+                vehicle.set_transform(waypoint.transform)
+
+                for keyword in seg_dict.keys():
+                    seg_dict[keyword].convert(carla.ColorConverter.CityScapesPalette)
+                fps = round(1.0 / snapshot.timestamp.delta_seconds)
+                print(snapshot.timestamp)
+
+                # Draw the display.
+                # draw_image(display, rgb_dict['center'])
+                draw_image(display, seg_dict['center'])
+                # for keyword, image in rgb_dict.items():
+                #     draw_image(display, image)
+                # for keyword, image in seg_dict.items():
+                #     draw_image(display, image, blend=True)
+                display.blit(
+                    font.render('% 5d FPS (real)' % clock.get_fps(), True, (255, 255, 255)),
+                    (8, 10))
+                display.blit(
+                    font.render('% 5d FPS (simulated)' % fps, True, (255, 255, 255)),
+                    (8, 28))
+                pygame.display.flip()
+    finally:
+        print('destroying actors.')
+        for actor in actor_list:
+            actor.destroy()
+        for sensor in camera_sensor_dict.values():
+            sensor.destroy()
+        for sensor in segmentation_sensor_dict.values():
+            sensor.destroy()
+        if collision_sensor is not None:
+            collision_sensor.destroy()
+
+        pygame.quit()
+        print('done.')
+
+
+if __name__ == '__main__':
+    main()

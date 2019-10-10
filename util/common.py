@@ -15,7 +15,7 @@ loggers = {}
 
 
 def add_carla_module():
-    module_path = Path.home() / 'projects/carla_python/carla/dist/carla-0.9.5-py3.5-linux-x86_64.egg'
+    module_path = Path.home() / 'projects/carla_python/carla/dist/carla-0.9.6-py3.5-linux-x86_64.egg'
     sys.path.append(str(module_path))
 
 
@@ -105,3 +105,24 @@ def fetch_node_name() -> str:
 def get_current_time():
     """Return Current Time in MS."""
     return int(round(time() * 1000))
+
+
+def fetch_ip_address():
+    from subprocess import run
+    from re import findall
+    from subprocess import PIPE
+    raw_lines = run(['ifconfig'], stdout=PIPE).stdout.decode()
+    candidates = findall('inet addr:([\d]+.[\d]+.[\d]+.[\d]+)', raw_lines)
+
+    def filter_out(cand: str):
+        if cand == '192.168.0.1':
+            return False
+        if cand.startswith('127') or cand.startswith('172'):
+            return False
+        return True
+
+    candidates = list(filter(filter_out, candidates))
+    if candidates:
+        return candidates[0]
+    else:
+        return '172.0.0.1'

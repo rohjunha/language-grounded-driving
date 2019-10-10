@@ -22,7 +22,7 @@ import cv2
 from custom_carla.agents.navigation.local_planner import RoadOption
 from data.types import DriveDataFrame, LengthComputer
 from environment import set_world_asynchronous, set_world_synchronous, FrameCounter, should_quit, GameEnvironment
-from util.common import add_carla_module, get_logger
+from util.common import add_carla_module, get_logger, fetch_ip_address
 from util.directory import EvaluationDirectory, mkdir_if_not_exists
 
 add_carla_module()
@@ -994,27 +994,6 @@ class OnlineEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
         if self.agent is not None:
             self.agent.destroy()
         return not exited
-
-
-def fetch_ip_address():
-    from subprocess import run
-    from re import findall
-    from subprocess import PIPE
-    raw_lines = run(['ifconfig'], stdout=PIPE).stdout.decode()
-    candidates = findall('inet addr:([\d]+.[\d]+.[\d]+.[\d]+)', raw_lines)
-
-    def filter_out(cand: str):
-        if cand == '192.168.0.1':
-            return False
-        if cand.startswith('127') or cand.startswith('172'):
-            return False
-        return True
-
-    candidates = list(filter(filter_out, candidates))
-    if candidates:
-        return candidates[0]
-    else:
-        return '172.0.0.1'
 
 
 class ExperimentArgument:
