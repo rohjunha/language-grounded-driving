@@ -2,6 +2,7 @@ from math import sqrt
 from typing import List
 
 from custom_carla.agents.navigation.agent import ControlWithInfo
+from custom_carla.agents.navigation.local_planner import RoadOption
 from util.common import add_carla_module
 from util.road_option import fetch_name_from_road_option, fetch_road_option_from_str
 from util.serialize import list_from_vector, parse_bool

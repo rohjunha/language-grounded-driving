@@ -6,9 +6,10 @@ import numpy as np
 import pygame
 
 from custom_carla.agents.navigation.agent import ControlWithInfo
+from custom_carla.agents.navigation.local_planner import RoadOption
 from data.types import CarState, DriveDataFrame
+from util.common import get_current_time
 from util.directory import ExperimentDirectory
-from util.serialize import str_from_waypoint
 
 
 def destroy_actor(actor):
@@ -68,6 +69,7 @@ def show_game(
 class FrameSnapshot:
     def __init__(self, timestamp, actor_snapshot: carla.ActorSnapshot, rgb_dict: Dict[str, Any], seg_dict: Dict[str, Any]):
         self.timestamp = timestamp
+        self.system_timestamp = get_current_time()
         if actor_snapshot is None:
             self.car_state = None
         else:
@@ -76,16 +78,18 @@ class FrameSnapshot:
                 actor_snapshot.get_velocity(),
                 actor_snapshot.get_angular_velocity(),
                 actor_snapshot.get_acceleration())
-        self.control = None
+        self.control = ControlWithInfo(road_option=RoadOption.VOID)
         self.rgb_dict = rgb_dict
         self.seg_dict = seg_dict
-        for key, value in self.rgb_dict.items():
-            self.rgb_dict[key] = np_from_carla_image(value, False)
-        for key, value in self.seg_dict.items():
-            self.seg_dict[key] = np_from_carla_image(value)
-        # self.vis_seg_dict = dict()
-        # for keyword in self.seg_dict.keys():
-        #     seg_dict[keyword].convert(carla.ColorConverter.CityScapesPalette)
+        self.sentence = None
+        self.subtask = None
+        self.stop = 0.0
+
+    def image(self, keyword: str):
+        return np_from_carla_image(self.rgb_dict[keyword], False)
+
+    def segment(self, keyword: str):
+        return np_from_carla_image(self.seg_dict[keyword])
 
     @property
     def valid(self):

@@ -17,19 +17,21 @@ from pathlib import Path
 from subprocess import run
 from time import sleep
 from typing import Dict, List
-from PIL import Image, ImageDraw, ImageFont
 
 import cv2
 import pyaudio
+from PIL import Image, ImageDraw, ImageFont
 from moviepy import editor
 from six.moves import queue
 
+from custom_carla.agents.navigation.agent import ControlWithInfo
+from custom_carla.agents.navigation.local_planner import RoadOption
 from data.types import DriveDataFrame, LengthComputer
-from game.common import SnapshotSaver
-from game.environment import set_world_asynchronous, set_world_synchronous, GameEnvironment, CarlaSyncWrapper
 from evaluator import ExperimentArgument, load_param_and_evaluator, load_evaluation_dataset, \
-    get_random_sentence_from_keyword, listen_keyboard
-from util.common import add_carla_module, get_logger, get_current_time, unique_with_islices, get_timestamp
+    listen_keyboard
+from game.common import SnapshotSaver, FrameSnapshot
+from game.environment import set_world_asynchronous, set_world_synchronous, GameEnvironment, CarlaSyncWrapper
+from util.common import add_carla_module, get_logger, get_current_time, unique_with_islices
 from util.directory import EvaluationDirectory, mkdir_if_not_exists
 
 add_carla_module()
@@ -130,7 +132,7 @@ class AudioManager:
         return audio_data, timing
 
 
-def generate_video_with_audio(directory: EvaluationDirectory, traj_index: int, from_replay: bool):
+def generate_video_with_audio(directory: EvaluationDirectory, traj_index: int):
     root_dir = directory.root_dir
     timing_path = root_dir / 'audios/timing{:02d}.json'.format(traj_index)
     state_path = root_dir / 'states/traj{:02d}.json'.format(traj_index)
@@ -138,7 +140,7 @@ def generate_video_with_audio(directory: EvaluationDirectory, traj_index: int, f
     out_audio_path = root_dir / 'audio{:02d}.wav'.format(traj_index)
     out_video_path = root_dir / 'video{:02d}.mp4'.format(traj_index)
     out_sub_path = root_dir / 'video{:02d}.vtt'.format(traj_index)
-    image_dir = root_dir / 'replays/images' if from_replay else 'images'
+    image_dir = root_dir / 'images' / '{:02d}'.format(traj_index)  # ('replays/images' if from_replay else 'images')
     audio_manager = AudioManager(directory)
     export_subtitle = False
 
@@ -761,6 +763,11 @@ def listen_print_loop(responses, stream, queue):
             sys.stdout.write(GREEN)
             sys.stdout.write('\033[K')
             sys.stdout.write(str(corrected_time) + ': ' + transcript.strip() + '\n')
+
+            transcript = transcript.replace('1st', 'first')
+            transcript = transcript.replace('2nd', 'second')
+            transcript = transcript.replace('loft', 'left')
+
             queue.put(transcript.strip())
 
             stream.is_final_end_time = stream.result_end_time
@@ -835,12 +842,18 @@ def launch_recognizer(language_queue, event, audio_path_func, audio_queue, audio
     event.set()
 
 
-class SpeechEvaluationEnvironment(GameEnvironment, SnapshotSaver, EvaluationDirectory):
-    def __init__(self, eval_keyword: str, language_queue, event, audio_queue, audio_setup_dict, traj_index, args):
+class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
+    def __init__(
+            self,
+            eval_keyword: str,
+            language_queue,
+            event,
+            audio_queue,
+            image_queue,
+            audio_setup_dict, traj_index, args):
         self.eval_keyword = eval_keyword
         args.show_game = True
         GameEnvironment.__init__(self, args=args, agent_type='evaluation')
-        SnapshotSaver.__init__(self, get_timestamp())
 
         self.event = event
         self.language_queue = language_queue
@@ -857,134 +870,128 @@ class SpeechEvaluationEnvironment(GameEnvironment, SnapshotSaver, EvaluationDire
 
         # set image type
         self.image_type = self.high_param.image_type
+        logger.info('use image type: {}'.format(self.image_type))
         if 'd' in self.image_type:
             from model import DeepLabModel, prepare_deeplab_model
             self.deeplab_model: DeepLabModel = prepare_deeplab_model()
 
-        self.final_images = []
         self.eval_dataset, self.eval_sentences = load_evaluation_dataset(self.high_param)
         self.eval_transforms = list(map(lambda x: x[0].state.transform, self.eval_dataset))
         self.high_sentences = self.eval_sentences
         self.softmax = torch.nn.Softmax(dim=1)
         EvaluationDirectory.__init__(self, *self.eval_info)
         self.high_data_dict = dict()
+        self.image_queue = image_queue
         self.audio_queue = audio_queue
         self.audio_setup_dict = audio_setup_dict
-        self.last_sub_task = None
-        self.sentence = None
 
     @property
     def eval_info(self):
         return self.control_param.exp_index, self.eval_name, \
                self.control_evaluator.step, 'online'
 
-    def process_segment(self, in_image):
-        return np.reshape(((in_image[:, :, 2] == 7).astype(dtype=np.uint8) * 255), (88, 200, 1))
+    def _get_image(self, frame_snapshot: FrameSnapshot):
+        return frame_snapshot.image('center')
 
-    def process_custom_segment(self, in_image):
-        return np.reshape(self.deeplab_model.run(in_image), (88, 200, 1))
+    def _get_segment(self, frame_snapshot: FrameSnapshot):
+        return np.reshape(((frame_snapshot.segment('center')[:, :, 0] == 7).astype(dtype=np.uint8) * 255), (88, 200, 1))
 
-    def process_image(self, in_image):
+    def _get_custom_segment(self, frame_snapshot: FrameSnapshot):
+        return np.reshape(self.deeplab_model.run(self._get_image(frame_snapshot)), (88, 200, 1))
+
+    def get_image(self, frame_snapshot: FrameSnapshot):
         if self.image_type == 's':
-            return self.process_segment(in_image)
+            return self._get_segment(frame_snapshot)
         elif self.image_type == 'd':
-            return self.process_custom_segment(in_image)
+            return self._get_custom_segment(frame_snapshot)
         elif self.image_type == 'bgr':
-            return in_image
+            return self._get_image(frame_snapshot)
         elif self.image_type == 'bgrs':
-            return np.concatenate((in_image, self.process_segment(in_image)), axis=-1)
+            return np.concatenate((self._get_image(frame_snapshot), self._get_segment(frame_snapshot)), axis=-1)
         elif self.image_type == 'bgrd':
-            return np.concatenate((in_image, self.process_custom_segment(in_image)), axis=-1)
-
-    @property
-    def segment_image(self):
-        return np.reshape(((self.agent.segment_frame[:, :, 2] == 7).astype(dtype=np.uint8) * 255), (88, 200, 1))
-
-    @property
-    def custom_segment_image(self):
-        return np.reshape(self.deeplab_model.run(self.agent.image_frame), (88, 200, 1))
-
-    @property
-    def final_image(self):
-        if self.image_type == 's':
-            return self.segment_image
-        elif self.image_type == 'd':
-            return self.custom_segment_image
-        elif self.image_type == 'bgr':
-            return self.agent.image_frame
-        elif self.image_type == 'bgrs':
-            return np.concatenate((self.agent.image_frame, self.segment_image), axis=-1)
-        elif self.image_type == 'bgrd':
-            return np.concatenate((self.agent.image_frame, self.custom_segment_image), axis=-1)
+            return np.concatenate((self._get_image(frame_snapshot), self._get_custom_segment(frame_snapshot)), axis=-1)
         else:
-            raise TypeError('invalid image type {}'.format(self.image_type))
+            raise TypeError('invalid image type')
 
-    def export_video(self, t: int, camera_keyword: str, curr_eval_data: dict):
-        _, sub_goals = zip(*curr_eval_data['stop_frames'])
-        texts = ['sentence: {}\nsub-task: {}'.format(s, g)
-                 for g, s in zip(sub_goals, curr_eval_data['sentences'])]
-        text_dict = {i: t for i, t in zip(range(*curr_eval_data['frame_range']), texts)}
-        src_image_files = [self.agent.image_path(f, camera_keyword) for f in range(*curr_eval_data['frame_range'])]
-        src_image_files = list(filter(lambda x: x.exists(), src_image_files))
-        image_frames = set([int(s.stem[:-1]) for s in src_image_files])
-        drive_frames = set(text_dict.keys())
-        common_frames = sorted(list(image_frames.intersection(drive_frames)))
-        src_image_files = [self.agent.image_path(f, camera_keyword) for f in common_frames]
-        dst_image_files = [self.image_dir / p.name for p in src_image_files]
-        [shutil.copy(str(s), str(d)) for s, d in zip(src_image_files, dst_image_files)]
-        text_list = [text_dict[f] for f in common_frames]
-        video_from_files(src_image_files, self.video_path(t, camera_keyword),
-                         texts=text_list, framerate=30, revert=True)
+    def _export_timing_dict(self, traj_index, frame_list: List[FrameSnapshot]):
+        timing_dict = {frame.frame: frame.system_timestamp for frame in frame_list}
+        with open(str(self.timing_path(traj_index)), 'w') as file:
+            json.dump(timing_dict, file, indent=4)
 
-    def export_segment_video(self, t: int):
-        final_image_files = [self.segment_dir / '{:08d}.png'.format(i) for i in range(len(self.final_images))]
-        logger.info('final_image_files {}'.format(len(final_image_files)))
-        for p, s in zip(final_image_files, self.final_images):
-            cv2.imwrite(str(p), s)
-        video_from_files(final_image_files, self.video_dir / 'segment{:02d}.mp4'.format(t),
-                         texts=[], framerate=30, revert=False)
+    def _export_image_list(self, traj_index, frame_list: List[FrameSnapshot], keyword: str, write_video: bool):
+        index_list = list(map(lambda x: x.frame, frame_list))
+        image_list = list(map(lambda x: x.image(keyword), frame_list))
+        [cv2.imwrite(str(self.image_path(traj_index, f, keyword)), i) for f, i in zip(index_list, image_list)]
+        if write_video:
+            sentence_list = list(map(attrgetter('sentence'), frame_list))
+            subtask_list = list(map(attrgetter('subtask'), frame_list))
+            text_list = ['sentence: {}\nsub-task: {}'.format(s, g) for s, g in zip(sentence_list, subtask_list)]
+            video_from_memory(image_list, self.video_path(traj_index, keyword), text_list)
+        return image_list
 
-    def export_evaluation_data(self, t: int, curr_eval_data: dict) -> bool:
-        with open(str(self.state_path(t)), 'w') as file:
-            json.dump(curr_eval_data, file, indent=2)
+    def _export_segment_list(self, traj_index, frame_list: List[FrameSnapshot], keyword: str, write_video: bool):
+        index_list = list(map(lambda x: x.frame, frame_list))
+        image_list = list(map(lambda x: x.segment(keyword), frame_list))
+        [cv2.imwrite(str(self.segment_image_path(traj_index, f, keyword)), i) for f, i in zip(index_list, image_list)]
+        if write_video and keyword == 'center':
+            video_from_memory(image_list, self.video_dir / 'segment{:02d}.mp4'.format(traj_index))
+        return image_list
 
-        data_frames = [DriveDataFrame.load_from_str(s) for s in curr_eval_data['data_frames']]
-        controls = list(map(attrgetter('control'), data_frames))
-        stops, sub_goals = zip(*curr_eval_data['stop_frames'])
-        logger.info('controls, stops, goals {}, {}, {}'.format(len(controls), len(stops), len(sub_goals)))
+    def _export_video(self, traj_index, frame_list: List[FrameSnapshot], keyword: str):
+        image_list = list(map(lambda x: x.image(keyword), frame_list))
+        sentence_list = list(map(attrgetter('sentence'), frame_list))
+        subtask_list = list(map(attrgetter('subtask'), frame_list))
+        text_list = ['sentence: {}\nsub-task: {}'.format(s, g) for s, g in zip(sentence_list, subtask_list)]
+        video_from_memory(image_list, self.video_path(traj_index, keyword), text_list)
 
-        timing_dict = self.export_timing_dict(t)
-        self.export_video(t, 'center', curr_eval_data)
-        self.export_video(t, 'extra', curr_eval_data)
-        self.export_segment_video(t)
+    def _export_segment_video(self, traj_index, frame_list: List[FrameSnapshot], keyword: str):
+        image_list = list(map(lambda x: x.segment(keyword), frame_list))
+        video_from_memory(image_list, self.video_dir / 'segment{:02d}.mp4'.format(traj_index))
 
-        return self.state_path(t).exists()
+    def _export_images_from_frame_snapshot(self, traj_index: int, frame_snapshot: FrameSnapshot):
+        data_dict = {'frame': frame_snapshot.frame, 'rgb': dict(), 'seg': dict()}
+        for key in frame_snapshot.rgb_dict.keys():
+            data_dict['rgb'][key] = frame_snapshot.image(key)
+        for key in frame_snapshot.seg_dict.keys():
+            data_dict['seg'][key] = frame_snapshot.segment(key)
+        self.image_queue.put((traj_index, data_dict))
+        # frame = frame_snapshot.frame
+        # for keyword in frame_snapshot.rgb_dict.keys():
+        #     cv2.imwrite(str(self.image_path(traj_index, frame, keyword)), frame_snapshot.image(keyword))
+        # for keyword in frame_snapshot.seg_dict.keys():
+        #     cv2.imwrite(str(self.segment_image_path(traj_index, frame, keyword)), frame_snapshot.segment(keyword))
 
-    def export_timing_dict(self, t: int):
-        target_sensor = None
-        if 'extra' in self.agent.camera_sensor_dict:
-            target_sensor = self.agent.camera_sensor_dict['extra']
-        elif 'center' in self.agent.camera_sensor_dict:
-            target_sensor = self.agent.camera_sensor_dict['center']
-        if target_sensor is None:
-            return dict()
-        with open(str(self.timing_path(t)), 'w') as file:
-            json.dump(target_sensor.timing_dict, file, indent=4)
-        return target_sensor.timing_dict
+    def _export_state(self, traj_index: int, frame_list: List[FrameSnapshot], collided: bool):
+        data_frame_range = frame_list[0].frame, frame_list[-1].frame + 1
+        data_frame_str_list = [str(f.data_frame) for f in frame_list]
+        stop_subtask_list = [(f.stop, f.subtask) for f in frame_list]
+        sentence_list = list(map(attrgetter('sentence'), frame_list))
+        state = {
+            'frame_range': data_frame_range,
+            'collided': collided,
+            'data_frames': data_frame_str_list,
+            'stop_frames': stop_subtask_list,
+            'sentences': sentence_list,
+        }
+        with open(str(self.state_path(traj_index)), 'w') as file:
+            json.dump(state, file, indent=2)
 
-    def export_transform_dict(self, t: int):
-        target_sensor = None
-        if 'extra' in self.agent.camera_sensor_dict:
-            target_sensor = self.agent.camera_sensor_dict['extra']
-        elif 'center' in self.agent.camera_sensor_dict:
-            target_sensor = self.agent.camera_sensor_dict['center']
-        if target_sensor is None:
-            return dict()
-        with open(str(self.transform_path(t)), 'w') as file:
-            json.dump(target_sensor.transform_dict, file, indent=4)
-        return target_sensor.transform_dict
+    def export_frame_list(self, traj_index: int, frame_list: List[FrameSnapshot], collided: bool):
+        self._export_timing_dict(traj_index, frame_list)
+        self._export_state(traj_index, frame_list, collided)
+        # image_dict = dict()
+        # segment_dict = dict()
+        for keyword in ['center', 'extra']:
+            self._export_video(traj_index, frame_list, keyword)
+        self._export_segment_video(traj_index, frame_list, 'center')
+        # for keyword in ['center', 'extra']:
+        #     image_dict[keyword] = self._export_image_list(traj_index, frame_list, keyword, write_video=True)
+        # for keyword in ['center']:
+        #     segment_dict[keyword] = self._export_segment_list(traj_index, frame_list, keyword, write_video=True)
 
-    def run_single_trajectory(self, t: int, transform: carla.Transform) -> Dict[str, bool]:
+    def run_single_trajectory(self, traj_index: int, transform: carla.Transform) -> Dict[str, bool]:
+        set_world_asynchronous(self.world)
+
         status = {
             'exited': False,  # has to finish the entire loop
             'finished': False,  # this procedure has been finished successfully
@@ -998,138 +1005,121 @@ class SpeechEvaluationEnvironment(GameEnvironment, SnapshotSaver, EvaluationDire
         self.control_evaluator.initialize()
         self.stop_evaluator.initialize()
         self.high_evaluator.initialize()
-        self.high_data_dict[t] = []
-        self.final_images = []
+        self.high_data_dict[traj_index] = []
 
-        # while not self.event.is_set():
-        #     if not self.language_queue.empty():
-        #         self.sentence = self.language_queue.get()
-        #     if self.sentence is not None:
-        #         break
-
-        self.sentence = get_random_sentence_from_keyword(self.eval_keyword)
-        self.last_sub_task = None
-        logger.info('moved the vehicle to the position {}'.format(t))
+        last_sentence = None
+        last_subtask = None
+        logger.info('moved the vehicle to the position {}'.format(traj_index))
 
         count = 0
         frame = None
         clock = pygame.time.Clock()
-
-        set_world_asynchronous(self.world)
         sleep(0.5)
         set_world_synchronous(self.world)
 
         agent_len = LengthComputer()
+        frame_list = []
         stop_buffer = []
-        with CarlaSyncWrapper(self.world, self.sensor_manager) as sync_mode:
-            while not status['exited'] or not status['collided']:
-                keyboard_input = listen_keyboard()
-                updated = False
-                if keyboard_input == 'q':
-                    status['exited'] = True
-                    self.event.set()
-                    logger.info('event was triggered')
-                    break
-                elif keyboard_input == 'r':
-                    status['restart'] = True
-                    logger.info('restarted by the user')
-                    return status
-                elif keyboard_input == 's':
+
+        while not status['exited'] or not status['collided']:
+            keyboard_input = listen_keyboard()
+            updated = False
+            if keyboard_input == 'q':
+                status['exited'] = True
+                self.event.set()
+                logger.info('event was triggered')
+                break
+            elif keyboard_input == 'r':
+                status['restart'] = True
+                logger.info('restarted by the user')
+                return status
+            elif keyboard_input == 's':
+                status['finished'] = True
+                logger.info('finished by the user')
+                break
+
+            if not self.language_queue.empty():
+                updated = True
+                last_sentence = self.language_queue.get()
+                logger.info('sentence was updated: {}'.format(last_sentence))
+                if last_sentence is None:
                     status['finished'] = True
-                    logger.info('finished by the user')
                     break
+                keyword = 'left'
+                self.eval_keyword = keyword
+                self.control_param.eval_keyword = keyword
+                self.stop_param.eval_keyword = keyword
+                self.high_param.eval_keyword = keyword
+                self.control_evaluator.param = self.control_param
+                self.stop_evaluator.param = self.stop_param
+                self.high_evaluator.cmd = keyword
+                self.high_evaluator.param = self.high_param
+                self.high_evaluator.sentence = keyword.lower()
+                self.control_evaluator.initialize()
+                self.stop_evaluator.initialize()
+                self.high_evaluator.initialize()
 
-                if not self.language_queue.empty():
-                    updated = True
-                    self.sentence = self.language_queue.get()
-                    logger.info('sentence was updated: {}'.format(self.sentence))
-                    if self.sentence is None:
-                        status['finished'] = True
-                        break
-                    keyword = 'left'
-                    self.eval_keyword = keyword
-                    self.control_param.eval_keyword = keyword
-                    self.stop_param.eval_keyword = keyword
-                    self.high_param.eval_keyword = keyword
-                    self.control_evaluator.param = self.control_param
-                    self.stop_evaluator.param = self.stop_param
-                    self.high_evaluator.cmd = keyword
-                    self.high_evaluator.param = self.high_param
-                    self.high_evaluator.sentence = keyword.lower()
-                    self.control_evaluator.initialize()
-                    self.stop_evaluator.initialize()
-                    self.high_evaluator.initialize()
+            if frame is not None and self.agent.collision_sensor.has_collided(frame):
+                logger.info('collision was detected at frame #{}'.format(frame))
+                status['collided'] = True
+                break
 
-                if frame is not None and self.agent.collision_sensor.has_collided(frame):
-                    logger.info('collision was detected at frame #{}'.format(frame))
-                    status['collided'] = True
-                    break
+            if count > 50 and agent_len.length < 0.5:
+                logger.info('simulation has a problem in going forward')
+                status['restart'] = True
+                return status
 
-                if count > 50 and agent_len.length < 0.5:
-                    logger.info('simulation has a problem in going forward')
-                    status['restart'] = True
-                    return status
+            clock.tick()
+            frame_snapshot = self.collect()
+            if not frame_snapshot.valid:
+                continue
+            frame_snapshot.sentence = last_sentence
+            frame_snapshot.subtask = last_subtask
 
-                clock.tick()
-                frame_snapshot = self.collect(sync_mode)
-                if not frame_snapshot.valid:
-                    continue
+            self._export_images_from_frame_snapshot(traj_index, frame_snapshot)
 
-                # self.world.tick()
-                # try:
-                #     ts = self.world.wait_for_tick()
-                # except RuntimeError as e:
-                #     logger.error('runtime error: {}'.format(e))
-                #     status['restart'] = True
-                #     return status
+            if self.show_image:
+                self.show(frame_snapshot.image('center'), clock, extra_str=last_sentence)
 
-                # if frame is not None:
-                #     if ts.frame_count != frame + 1:
-                #         logger.info('frame skip!')
-                # frame = ts.frame_count
-                #
-                # if self.agent.image_frame is None:
-                #     continue
-                # if self.agent.segment_frame is None:
-                #     continue
+            final_image = self.get_image(frame_snapshot)
 
-                # run high-level evaluator when stopped was triggered by the low-level controller
-                # final_image = self.final_image
-                final_image = self.process_image(frame_snapshot.rgb_dict['center'])
-                print(final_image.shape)
+            if last_sentence is not None:
                 if status['stopped'] or self.control_evaluator.cmd == 3 and updated:
-                    sentence = deepcopy(self.sentence)
+                    sentence = deepcopy(last_sentence)
                     action = self.high_evaluator.run_step(final_image, sentence)
                     action = self.softmax(action)
                     action_index = torch.argmax(action[-1], dim=0).item()
                     location = frame_snapshot.car_state.transform.location
-                    self.high_data_dict[t].append((final_image, {
+                    self.high_data_dict[traj_index].append((final_image, {
                         'sentence': sentence,
                         'location': (location.x, location.y),
                         'action_index': action_index}))
                     sub_task = HIGH_LEVEL_COMMAND_NAMES[action_index]
                     # if self.last_sub_task != sub_task:
-                    self.last_sub_task = sub_task
-                    logger.info('sentence: {}, sub-task: {}'.format(sentence, self.last_sub_task))
+                    last_subtask = sub_task
+                    frame_snapshot.subtask = last_subtask
+                    logger.info('sentence: {}, sub-task: {}'.format(sentence, last_subtask))
                     if action_index < 4:
                         self.control_evaluator.cmd = action_index
                         self.stop_evaluator.cmd = action_index
                         stop_buffer = []
                     else:
-                        logger.info('the task was finished by "finish"')
-                        status['finished'] = True
-                        break
+                        self.control_evaluator.cmd = 3
+                        self.stop_evaluator.cmd = 3
+                        stop_buffer = []
+                        # logger.info('the task was finished by "finish"')
+                        # status['finished'] = True
+                        # break
 
                 # run low-level evaluator to apply control and update stopped status
                 if count % EVAL_FRAMERATE_SCALE == 0:
-                    frame_snapshot.control = self.control_evaluator.run_step(final_image)
+                    control = self.control_evaluator.run_step(final_image)
+                    frame_snapshot.control = ControlWithInfo(control=control, road_option=RoadOption.VOID)
                     stop: float = self.stop_evaluator.run_step(final_image)
                     sub_goal = fetch_high_level_command_from_index(self.control_evaluator.cmd).lower()
                     logger.info('{} {:+6.4f}'.format(sub_goal, stop))
-                    # logger.info('throttle {:+6.4f}, steer {:+6.4f}, delayed {}, current {:d}, stop {:+6.4f}'.
-                    #             format(control.throttle, control.steer, frame - self.agent.image_frame_number, action_index,
-                    #                    stop))
-                    self.agent.step_from_control(frame_snapshot.control)
+                    frame_snapshot.stop = stop
+                    self.agent.step_from_control(control)
                     # self.agent.save_stop(frame, stop, sub_goal)
                     # self.agent.save_cmd(frame, self.sentence)
                     # agent_len(self.agent.data_frame_dict[self.agent.data_frame_number].state.transform.location)
@@ -1137,24 +1127,19 @@ class SpeechEvaluationEnvironment(GameEnvironment, SnapshotSaver, EvaluationDire
                     stop_buffer.append(stop)
                     recent_buffer = stop_buffer[-3:]
                     status['stopped'] = len(recent_buffer) > 2 and sum(list(map(lambda x: x > 0.0, recent_buffer))) > 1
-                    self.save(frame_snapshot)
-
-                if self.show_image:
-                    self.show(frame_snapshot.rgb_dict['center'], clock, extra_str=self.sentence)
-
-                self.final_images.append(final_image)
 
                 count += 1
+
+            frame_list.append(frame_snapshot)
 
         self.audio_queue.put({
             'timestamp': get_current_time(),
             'data': None,
-            'traj_index': t,
+            'traj_index': traj_index,
         })
-        logger.info('saving information')
-        curr_eval_data = self.agent.export_eval_data(status['collided'], self.sentence)
-        if curr_eval_data is not None:
-            status['saved'] = self.export_evaluation_data(t, curr_eval_data)
+        self.export_frame_list(traj_index, frame_list, status['collided'])
+        logger.info('exported all information')
+        status['saved'] = len(frame_list) > 0
         return status
 
     def run(self) -> bool:
@@ -1307,6 +1292,22 @@ def audio_saver(directory: EvaluationDirectory, audio_queue: Queue, video_queue:
     video_queue.put(None)
 
 
+def image_saver(directory: EvaluationDirectory, frame_queue: Queue, event: Event):
+    while not event.is_set():
+        if not frame_queue.empty():
+            item = frame_queue.get()
+            if item is None:
+                event.set()
+                break
+            traj_index, data_dict = item
+            frame = data_dict['frame']
+            for keyword in data_dict['rgb'].keys():
+                cv2.imwrite(str(directory.image_path(traj_index, frame, keyword)), data_dict['rgb'][keyword])
+            for keyword in data_dict['seg'].keys():
+                cv2.imwrite(str(directory.segment_image_path(traj_index, frame, keyword)), data_dict['seg'][keyword])
+    event.set()
+
+
 def video_saver(directory: EvaluationDirectory, video_queue: Queue, event: Event):
     max_trial = 3
     while not event.is_set():
@@ -1318,7 +1319,7 @@ def video_saver(directory: EvaluationDirectory, video_queue: Queue, event: Event
             generated = False
             count = 0
             while not generated and count < max_trial:
-                generated = generate_video_with_audio(directory, traj_index, False)
+                generated = generate_video_with_audio(directory, traj_index)
                 count += 1
     event.set()
 
@@ -1392,6 +1393,7 @@ def main():
     language_queue = Queue()
     audio_queue = Queue()
     video_queue = Queue()
+    image_queue = Queue()
     event = Event()
     manager = Manager()
     traj_index = manager.Value('i', 0)
@@ -1402,13 +1404,14 @@ def main():
         Process(target=launch_recognizer,
                 args=(language_queue, event, directory.audio_path, audio_queue, audio_setup_dict, traj_index, )),
         Process(target=audio_saver, args=(directory, audio_queue, video_queue, event,)),
-        Process(target=video_saver, args=(directory, video_queue, event, ),)
+        Process(target=image_saver, args=(directory, image_queue, event, )),
+        Process(target=video_saver, args=(directory, video_queue, event, )),
     ]
     for p in processes:
         p.start()
     for keyword in args.eval_keywords:
         env = SpeechEvaluationEnvironment(
-            keyword, language_queue, event, audio_queue, audio_setup_dict, traj_index, args)
+            keyword, language_queue, event, audio_queue, image_queue, audio_setup_dict, traj_index, args)
         if not env.run():
             event.set()
             break
@@ -1422,19 +1425,19 @@ def main():
 
     info = audio_manager.load_audio_info()
     for traj_index in info.keys():
-        generate_video_with_audio(directory, traj_index, False)
+        generate_video_with_audio(directory, traj_index)
 
 
 def generate_video_from_replay(directory):
     audio_manager = AudioManager(directory)
     info = audio_manager.load_audio_info()
     for traj_index in info.keys():
-        generate_video_with_audio(directory, traj_index, True)
+        generate_video_with_audio(directory, traj_index)
 
 
 if __name__ == '__main__':
     # directory = EvaluationDirectory(40, 'ls-town2', 72500, 'online')
-    # generate_video_with_audio(directory, 7, True)
+    # generate_video_with_audio(directory, 3, True)
     # generate_canonical_data_structure(directory, 7, True)
     # generate_video_from_replay(directory)
     main()

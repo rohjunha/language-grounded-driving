@@ -187,15 +187,11 @@ class CarlaSyncWrapper:
             sensor_manager: SensorManager):
         self.world = world
         self.delta_seconds = 1.0 / DATASET_FRAMERATE
-        self.settings = self.world.get_settings()
+        # self.settings = self.world.get_settings()
         self.sensor_manager = sensor_manager
         self.world_queue = None
         self.camera_queue_dict = dict()
         self.segmentation_queue_dict = dict()
-        self.frame = None
-
-    def __enter__(self):
-        self.settings = self.world.get_settings()
         self.frame = self.world.apply_settings(carla.WorldSettings(
             no_rendering_mode=False,
             synchronous_mode=True,
@@ -216,7 +212,6 @@ class CarlaSyncWrapper:
             make_queue_dict(self.camera_queue_dict, keyword, sensor.listen)
         for keyword, sensor in self.sensor_manager.segmentation_sensor_dict.items():
             make_queue_dict(self.segmentation_queue_dict, keyword, sensor.listen)
-        return self
 
     def tick(self, timeout):
         self.frame = self.world.tick()
@@ -226,9 +221,6 @@ class CarlaSyncWrapper:
         assert all(x.frame == self.frame for x in camera_data_dict.values())
         assert all(x.frame == self.frame for x in segmentation_data_dict.values())
         return world_data, camera_data_dict, segmentation_data_dict
-
-    def __exit__(self, *args, **kwargs):
-        self.world.apply_settings(self.settings)
 
     def retrieve_data(self, sensor_queue, timeout):
         while True:
@@ -709,6 +701,7 @@ class GameEnvironment:
                                             args.camera_keywords, args.width, args.height, args.use_extra)
         set_world_synchronous(self.world)
         assert self.world.get_settings().synchronous_mode
+        self.sync_mode = CarlaSyncWrapper(self.world, self.sensor_manager)
 
     @property
     def vehicle(self):
@@ -724,7 +717,7 @@ class GameEnvironment:
 
     def show(self, image, clock, road_option = None, is_intersection = None, extra_str: str = ''):
         assert self.show_image
-        show_game(self.display, self.font, image, clock, road_option, is_intersection, extra_str)
+        show_game(self.display, self.font, image[:, :, ::-1], clock, road_option, is_intersection, extra_str)
 
     @property
     def autopilot(self):
@@ -739,10 +732,10 @@ class GameEnvironment:
         if self.sensor_manager is not None:
             self.sensor_manager.destroy()
 
-    def collect(self, sync_mode: CarlaSyncWrapper) -> FrameSnapshot:
+    def collect(self) -> FrameSnapshot:
         actor_snapshot = None
         try:
-            snapshot, rgb_dict, seg_dict = sync_mode.tick(timeout=2.0)
+            snapshot, rgb_dict, seg_dict = self.sync_mode.tick(timeout=2.0)
             if snapshot.has_actor(self.vehicle.id):
                 actor_snapshot = snapshot.find(self.vehicle.id)
         except:
@@ -750,79 +743,78 @@ class GameEnvironment:
         return FrameSnapshot(snapshot.timestamp, actor_snapshot, rgb_dict, seg_dict)
 
 
-def main():
-    actor_list = []
-    pygame.init()
-
-    display = pygame.display.set_mode(
-        (200, 88),
-        pygame.HWSURFACE | pygame.DOUBLEBUF)
-    font = get_font()
-    clock = pygame.time.Clock()
-
-    client = carla.Client('localhost', 2000)
-    client.set_timeout(2.0)
-    world = client.get_world()
-
-    sensor_manager = None
-    try:
-        m = world.get_map()
-        start_pose = random.choice(m.get_spawn_points())
-        waypoint = m.get_waypoint(start_pose.location)
-
-        blueprint_library = world.get_blueprint_library()
-
-        vehicle = world.spawn_actor(
-            random.choice(blueprint_library.filter('vehicle.*')),
-            start_pose)
-        actor_list.append(vehicle)
-        vehicle.set_simulate_physics(False)
-
-        sensor_manager = SensorManager(world, vehicle, ['right', 'center', 'left'], 200, 88, False)
-        print(vehicle.id)
-        with CarlaSyncWrapper(world, sensor_manager) as sync_mode:
-            while True:
-                if should_quit():
-                    return
-                clock.tick()
-
-                snapshot, rgb_dict, seg_dict = sync_mode.tick(timeout=2.0)
-                # if snapshot.has_actor(vehicle.id):
-                #     actor_snapshot = snapshot.find(vehicle.id)
-                #     print(actor_snapshot.get_transform())
-
-                # Choose the next waypoint and update the car location.
-                waypoint = random.choice(waypoint.next(1.5))
-                vehicle.set_transform(waypoint.transform)
-
-                for keyword in seg_dict.keys():
-                    seg_dict[keyword].convert(carla.ColorConverter.CityScapesPalette)
-                fps = round(1.0 / snapshot.timestamp.delta_seconds)
-                print(snapshot.timestamp)
-
-                # Draw the display.
-                # draw_image(display, rgb_dict['center'])
-                draw_image(display, seg_dict['center'])
-                # for keyword, image in rgb_dict.items():
-                #     draw_image(display, image)
-                # for keyword, image in seg_dict.items():
-                #     draw_image(display, image, blend=True)
-                display.blit(
-                    font.render('% 5d FPS (real)' % clock.get_fps(), True, (255, 255, 255)),
-                    (8, 10))
-                display.blit(
-                    font.render('% 5d FPS (simulated)' % fps, True, (255, 255, 255)),
-                    (8, 28))
-                pygame.display.flip()
-    finally:
-        print('destroying actors.')
-        for actor in actor_list:
-            actor.destroy()
-        if sensor_manager is not None:
-            sensor_manager.destroy()
-        pygame.quit()
-        print('done.')
-
-
-if __name__ == '__main__':
-    main()
+# def main():
+#     actor_list = []
+#     pygame.init()
+#
+#     display = pygame.display.set_mode(
+#         (200, 88),
+#         pygame.HWSURFACE | pygame.DOUBLEBUF)
+#     font = get_font()
+#     clock = pygame.time.Clock()
+#
+#     client = carla.Client('localhost', 2000)
+#     client.set_timeout(2.0)
+#     world = client.get_world()
+#
+#     sensor_manager = None
+#     try:
+#         m = world.get_map()
+#         start_pose = random.choice(m.get_spawn_points())
+#         waypoint = m.get_waypoint(start_pose.location)
+#
+#         blueprint_library = world.get_blueprint_library()
+#
+#         vehicle = world.spawn_actor(
+#             random.choice(blueprint_library.filter('vehicle.*')),
+#             start_pose)
+#         actor_list.append(vehicle)
+#         vehicle.set_simulate_physics(False)
+#
+#         sensor_manager = SensorManager(world, vehicle, ['right', 'center', 'left'], 200, 88, False)
+#         print(vehicle.id)
+#         while True:
+#             if should_quit():
+#                 return
+#             clock.tick()
+#
+#             snapshot, rgb_dict, seg_dict = self.sync_mode.tick(timeout=2.0)
+#             # if snapshot.has_actor(vehicle.id):
+#             #     actor_snapshot = snapshot.find(vehicle.id)
+#             #     print(actor_snapshot.get_transform())
+#
+#             # Choose the next waypoint and update the car location.
+#             waypoint = random.choice(waypoint.next(1.5))
+#             vehicle.set_transform(waypoint.transform)
+#
+#             for keyword in seg_dict.keys():
+#                 seg_dict[keyword].convert(carla.ColorConverter.CityScapesPalette)
+#             fps = round(1.0 / snapshot.timestamp.delta_seconds)
+#             print(snapshot.timestamp)
+#
+#             # Draw the display.
+#             # draw_image(display, rgb_dict['center'])
+#             draw_image(display, seg_dict['center'])
+#             # for keyword, image in rgb_dict.items():
+#             #     draw_image(display, image)
+#             # for keyword, image in seg_dict.items():
+#             #     draw_image(display, image, blend=True)
+#             display.blit(
+#                 font.render('% 5d FPS (real)' % clock.get_fps(), True, (255, 255, 255)),
+#                 (8, 10))
+#             display.blit(
+#                 font.render('% 5d FPS (simulated)' % fps, True, (255, 255, 255)),
+#                 (8, 28))
+#             pygame.display.flip()
+#     finally:
+#         print('destroying actors.')
+#         for actor in actor_list:
+#             actor.destroy()
+#         if sensor_manager is not None:
+#             sensor_manager.destroy()
+#         pygame.quit()
+#         print('done.')
+#
+#
+# if __name__ == '__main__':
+#     main()

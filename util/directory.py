@@ -201,6 +201,21 @@ class EvaluationDirectory:
         self.summary_dir = mkdir_if_not_exists(self.root_dir / 'summary')
         self.summary_path = self.summary_dir / 'summary.json'
 
+    def frame_str(self, frame: int):
+        return frame_str(frame)
+
+    def image_sub_dir(self, traj_index: int) -> Path:
+        return mkdir_if_not_exists(self.image_dir / '{:02d}'.format(traj_index))
+
+    def segment_sub_dir(self, traj_index: int) -> Path:
+        return mkdir_if_not_exists(self.segment_dir / '{:02d}'.format(traj_index))
+
+    def image_path(self, traj_index: int, frame_number: int, camera_keyword: str = 'center'):
+        return self.image_sub_dir(traj_index) / '{}{}.png'.format(self.frame_str(frame_number), camera_keyword[0])
+
+    def segment_image_path(self, traj_index: int, frame_number: int, camera_keyword: str = 'center'):
+        return self.segment_sub_dir(traj_index) / '{}{}.png'.format(self.frame_str(frame_number), camera_keyword[0])
+
     def video_path(self, traj_index: int, camera_keyword: str = 'center') -> Path:
         return self.video_dir / 'traj{:02d}{}.mp4'.format(traj_index, camera_keyword[0])
 
