@@ -137,7 +137,8 @@ def generate_video_with_audio(directory: EvaluationDirectory, traj_index: int, f
     out_audio_path = root_dir / 'audio{:02d}.wav'.format(traj_index)
     out_video_path = root_dir / 'video{:02d}.mp4'.format(traj_index)
     out_sub_path = root_dir / 'video{:02d}.vtt'.format(traj_index)
-    image_dir = root_dir / 'replays/images' if from_replay else 'images'
+    # image_dir = root_dir / ('replays/images' if from_replay else 'images')
+    image_dir = root_dir / 'images'
     audio_manager = AudioManager(directory)
     export_subtitle = False
 
@@ -157,14 +158,19 @@ def generate_video_with_audio(directory: EvaluationDirectory, traj_index: int, f
     with open(str(state_path), 'r') as file:
         state_dict = json.load(file)
     frame_range = state_dict['frame_range']
+    # print('frame_range: {}'.format(frame_range))
     sentence_dict = {i: s for i, s in zip(range(*frame_range), state_dict['sentences'])}
     subtask_dict = {i: s for i, s in zip(range(*frame_range), map(itemgetter(1), state_dict['stop_frames']))}
+    len_frame_range = min(len(list(sentence_dict.keys())), len(list(subtask_dict.keys())))
+    frame_range = frame_range[0], frame_range[0] + len_frame_range
+    # print('frame_range: {}'.format(frame_range))
 
     # read timing dict and prune with images
     def get_frame_from_image_path(image_path):
         return int(image_path.stem[:-1])
 
     frame_from_images = [get_frame_from_image_path(p) for p in sorted(image_dir.glob('*e.png'))]
+    # print(len(frame_from_images))
     with open(str(timing_path), 'r') as file:
         raw_timing_dict = json.load(file)
     timing_dict = dict()
@@ -218,8 +224,8 @@ def generate_video_with_audio(directory: EvaluationDirectory, traj_index: int, f
             continue
         image_dict[key] = value
     images = [image_dict[f] for f in image_frames]
-    sentences = [sentence_dict[f] for f in image_frames]
-    subtasks = [subtask_dict[f] for f in image_frames]
+    sentences = [sentence_dict[f] if f in sentence_dict else 'None' for f in image_frames]
+    subtasks = [subtask_dict[f] if f in subtask_dict else 'None' for f in image_frames]
     logger.info('read {} images'.format(len(image_dict.keys())))
 
     if export_subtitle:
@@ -987,7 +993,7 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
         #     if self.sentence is not None:
         #         break
 
-        self.sentence = get_random_sentence_from_keyword(self.eval_keyword)
+        self.sentence = None
         self.last_sub_task = None
         logger.info('moved the vehicle to the position {}'.format(t))
 
@@ -1044,7 +1050,7 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
                 status['collided'] = True
                 break
 
-            if count > 50 and agent_len.length < 0.5:
+            if count > 2000 and agent_len.length < 0.5:
                 logger.info('simulation has a problem in going forward')
                 status['restart'] = True
                 return status
@@ -1068,53 +1074,62 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
             if self.agent.segment_frame is None:
                 continue
 
-            # run high-level evaluator when stopped was triggered by the low-level controller
-            final_image = self.final_image
-            if status['stopped'] or self.control_evaluator.cmd == 3 and updated:
-                sentence = deepcopy(self.sentence)
-                action = self.high_evaluator.run_step(final_image, sentence)
-                action = self.softmax(action)
-                action_index = torch.argmax(action[-1], dim=0).item()
-                location = self.agent.fetch_car_state().transform.location
-                self.high_data_dict[t].append((final_image, {
-                    'sentence': sentence,
-                    'location': (location.x, location.y),
-                    'action_index': action_index}))
-                sub_task = HIGH_LEVEL_COMMAND_NAMES[action_index]
-                # if self.last_sub_task != sub_task:
-                self.last_sub_task = sub_task
-                logger.info('sentence: {}, sub-task: {}'.format(sentence, self.last_sub_task))
-                if action_index < 4:
-                    self.control_evaluator.cmd = action_index
-                    self.stop_evaluator.cmd = action_index
-                    stop_buffer = []
-                else:
-                    logger.info('the task was finished by "finish"')
-                    status['finished'] = True
-                    break
-
-            # run low-level evaluator to apply control and update stopped status
-            if count % EVAL_FRAMERATE_SCALE == 0:
-                control: carla.VehicleControl = self.control_evaluator.run_step(final_image)
-                stop: float = self.stop_evaluator.run_step(final_image)
-                sub_goal = fetch_high_level_command_from_index(self.control_evaluator.cmd).lower()
-                logger.info('{} {:+6.4f}'.format(sub_goal, stop))
-                # logger.info('throttle {:+6.4f}, steer {:+6.4f}, delayed {}, current {:d}, stop {:+6.4f}'.
-                #             format(control.throttle, control.steer, frame - self.agent.image_frame_number, action_index,
-                #                    stop))
-                self.agent.step_from_control(frame, control)
-                self.agent.save_stop(frame, stop, sub_goal)
-                self.agent.save_cmd(frame, self.sentence)
-                agent_len(self.agent.data_frame_dict[self.agent.data_frame_number].state.transform.location)
-                stop_buffer.append(stop)
-                recent_buffer = stop_buffer[-3:]
-                status['stopped'] = len(recent_buffer) > 2 and sum(list(map(lambda x: x > 0.0, recent_buffer))) > 1
-
             if self.show_image and self.agent.image_frame is not None:
                 self.show(self.agent.image_frame, clock, extra_str=self.sentence)
 
+            final_image = self.final_image
             self.final_images.append(final_image)
 
+            if self.sentence is None:
+                control = carla.VehicleControl()
+                control.steer = 0.0
+                control.throttle = 0.0
+                control.brake = 1.0
+                control.hand_brake = False
+                self.agent.step_from_control(frame, control)
+                self.agent.save_stop(frame, 0.0, 'None')
+                self.agent.save_cmd(frame, 'None')
+            else:
+                # run high-level evaluator when stopped was triggered by the low-level controller
+                if status['stopped'] or self.control_evaluator.cmd == 3 and updated:
+                    sentence = deepcopy(self.sentence)
+                    action = self.high_evaluator.run_step(final_image, sentence)
+                    action = self.softmax(action)
+                    action_index = torch.argmax(action[-1], dim=0).item()
+                    location = self.agent.fetch_car_state().transform.location
+                    self.high_data_dict[t].append((final_image, {
+                        'sentence': sentence,
+                        'location': (location.x, location.y),
+                        'action_index': action_index}))
+                    sub_task = HIGH_LEVEL_COMMAND_NAMES[action_index]
+                    # if self.last_sub_task != sub_task:
+                    self.last_sub_task = sub_task
+                    logger.info('sentence: {}, sub-task: {}'.format(sentence, self.last_sub_task))
+                    if action_index < 4:
+                        self.control_evaluator.cmd = action_index
+                        self.stop_evaluator.cmd = action_index
+                        stop_buffer = []
+                    else:
+                        logger.info('the task was finished by "finish"')
+                        status['finished'] = True
+                        break
+
+                # run low-level evaluator to apply control and update stopped status
+                if count % EVAL_FRAMERATE_SCALE == 0:
+                    control: carla.VehicleControl = self.control_evaluator.run_step(final_image)
+                    stop: float = self.stop_evaluator.run_step(final_image)
+                    sub_goal = fetch_high_level_command_from_index(self.control_evaluator.cmd).lower()
+                    logger.info('{} {:+6.4f}'.format(sub_goal, stop))
+                    # logger.info('throttle {:+6.4f}, steer {:+6.4f}, delayed {}, current {:d}, stop {:+6.4f}'.
+                    #             format(control.throttle, control.steer, frame - self.agent.image_frame_number, action_index,
+                    #                    stop))
+                    self.agent.step_from_control(frame, control)
+                    self.agent.save_stop(frame, stop, sub_goal)
+                    self.agent.save_cmd(frame, self.sentence)
+                    agent_len(self.agent.data_frame_dict[self.agent.data_frame_number].state.transform.location)
+                    stop_buffer.append(stop)
+                    recent_buffer = stop_buffer[-3:]
+                    status['stopped'] = len(recent_buffer) > 2 and sum(list(map(lambda x: x > 0.0, recent_buffer))) > 1
             count += 1
 
         self.audio_queue.put({
@@ -1404,8 +1419,8 @@ def generate_video_from_replay(directory):
 
 
 if __name__ == '__main__':
-    directory = EvaluationDirectory(40, 'ls-town2', 72500, 'online')
-    # generate_video_with_audio(directory, 7, True)
-    generate_canonical_data_structure(directory, 7, True)
+    # directory = EvaluationDirectory(40, 'ls-town2', 72500, 'online')
+    # generate_video_with_audio(directory, 9, True)
+    # generate_canonical_data_structure(directory, 7, True)
     # generate_video_from_replay(directory)
-    # main()
+    main()
