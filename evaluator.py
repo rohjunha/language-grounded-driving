@@ -1031,6 +1031,7 @@ class ExperimentArgument:
         self.port: int = info_dict['port']
         self.res: str = '200x88'
         self.width, self.height = [int(x) for x in self.res.split('x')]
+        self.display_scale = 8
         self.filter: str = 'vehicle.*'
         self.map: str = None
         self.speed: int = 20

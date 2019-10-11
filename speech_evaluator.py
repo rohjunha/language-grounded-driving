@@ -885,25 +885,33 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
                self.control_evaluator.step, 'online'
 
     @property
-    def segment_image(self):
+    def original_image(self):
+        return self.agent.image_frame
+
+    @property
+    def resized_image(self):
+        return cv2.resize(self.agent.image_frame, (200, 88))
+
+    @property
+    def segment(self):
         return np.reshape(((self.agent.segment_frame[:, :, 2] == 7).astype(dtype=np.uint8) * 255), (88, 200, 1))
 
     @property
-    def custom_segment_image(self):
-        return np.reshape(self.deeplab_model.run(self.agent.image_frame), (88, 200, 1))
+    def custom_segment(self):
+        return np.reshape(self.deeplab_model.run(self.resized_image), (88, 200, 1))
 
     @property
     def final_image(self):
         if self.image_type == 's':
-            return self.segment_image
+            return self.segment
         elif self.image_type == 'd':
-            return self.custom_segment_image
+            return self.custom_segment
         elif self.image_type == 'bgr':
-            return self.agent.image_frame
+            return self.resized_image
         elif self.image_type == 'bgrs':
-            return np.concatenate((self.agent.image_frame, self.segment_image), axis=-1)
+            return np.concatenate((self.resized_image, self.segment), axis=-1)
         elif self.image_type == 'bgrd':
-            return np.concatenate((self.agent.image_frame, self.custom_segment_image), axis=-1)
+            return np.concatenate((self.resized_image, self.custom_segment), axis=-1)
         else:
             raise TypeError('invalid image type {}'.format(self.image_type))
 
@@ -943,7 +951,7 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
 
         timing_dict = self.export_timing_dict(t)
         self.export_video(t, 'center', curr_eval_data)
-        self.export_video(t, 'extra', curr_eval_data)
+        # self.export_video(t, 'extra', curr_eval_data)
         self.export_segment_video(t)
 
         return self.state_path(t).exists()
@@ -1073,10 +1081,11 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
             if self.agent.segment_frame is None:
                 continue
 
-            if self.show_image and self.agent.image_frame is not None:
-                self.show(self.agent.image_frame, clock, extra_str=self.sentence)
+            if self.show_image and self.original_image is not None:
+                self.show(self.original_image, clock, extra_str=self.sentence)
 
             final_image = self.final_image
+            print(frame, final_image.shape)
             self.final_images.append(final_image)
 
             if self.sentence is None:
@@ -1262,7 +1271,7 @@ def interpolate_frame_by_timing(query_timing: int, frame_by_timing: Dict[int, in
         raise ValueError('could not find any neighboring frames')
 
 
-def audio_saver(directory: EvaluationDirectory, audio_queue: Queue, video_queue: Queue, event: Event):
+def audio_saver(directory: EvaluationDirectory, audio_queue: Queue, event: Event):
     audio_start_ts = -1
     audio_list = []
     audio_manager = AudioManager(directory)
@@ -1275,7 +1284,6 @@ def audio_saver(directory: EvaluationDirectory, audio_queue: Queue, video_queue:
             if audio_data is None:
                 final_audio_data = b''.join(audio_list)
                 audio_manager.save_audio_with_timing(final_audio_data, audio_start_ts, traj_index)
-                video_queue.put(traj_index)
                 audio_start_ts = -1
                 audio_list = []
             else:
@@ -1283,7 +1291,6 @@ def audio_saver(directory: EvaluationDirectory, audio_queue: Queue, video_queue:
             if audio_start_ts < 0:
                 audio_start_ts = timestamp
     event.set()
-    video_queue.put(None)
 
 
 def video_saver(directory: EvaluationDirectory, video_queue: Queue, event: Event):
@@ -1362,26 +1369,18 @@ def main():
     args = ExperimentArgument(exp_name, data)
     param, evaluator = load_param_and_evaluator(eval_keyword='left,right', args=args, model_type='control')
     directory = EvaluationDirectory(param.exp_index, args.eval_name, evaluator.step, 'online')
-    # if directory.root_dir.exists():
-    #     [p.unlink() for p in directory.audio_dir.glob('*')]
-    #     [p.unlink() for p in directory.state_dir.glob('*')]
-    #     [p.unlink() for p in directory.image_dir.glob('*')]
-    #     [p.unlink() for p in directory.segment_dir.glob('*')]
 
     language_queue = Queue()
     audio_queue = Queue()
-    video_queue = Queue()
     event = Event()
     manager = Manager()
     traj_index = manager.Value('i', 0)
     audio_setup_dict = manager.dict()
-    audio_manager = AudioManager(directory)
 
     processes = [
         Process(target=launch_recognizer,
                 args=(language_queue, event, directory.audio_path, audio_queue, audio_setup_dict, traj_index, )),
-        Process(target=audio_saver, args=(directory, audio_queue, video_queue, event,)),
-        Process(target=video_saver, args=(directory, video_queue, event, ),)
+        Process(target=audio_saver, args=(directory, audio_queue, event,)),
     ]
     for p in processes:
         p.start()
@@ -1399,9 +1398,10 @@ def main():
     # finally:
     #     logger.info('finished the evaluation')
 
-    info = audio_manager.load_audio_info()
-    for traj_index in info.keys():
-        generate_video_with_audio(directory, traj_index, False)
+    # audio_manager = AudioManager(directory)
+    # info = audio_manager.load_audio_info()
+    # for traj_index in info.keys():
+    #     generate_video_with_audio(directory, traj_index, False)
 
 
 def generate_video_from_replay(directory):
