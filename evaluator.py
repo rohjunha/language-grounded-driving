@@ -87,7 +87,7 @@ class LowLevelEvaluator(CheckpointBase):
     def _prepare_batch(self, image: np.ndarray, custom_action_index: int = -1):
         # self.initialize()
         self.images.append(_tensor_from_numpy_image(image))
-        self.images = self.images[-10:]
+        self.images = self.images[-20:]
         data_dict = {
             'onehot': self.onehot_vector,
             'action_index': [self.cmd if custom_action_index < 0 else custom_action_index],
@@ -117,13 +117,11 @@ class LowLevelEvaluator(CheckpointBase):
 class HighLevelEvaluator(CheckpointBase):
     def __init__(self, param: Parameter, cmd: str):
         CheckpointBase.__init__(self, param)
-        self.cmd = cmd
         self.param = param
         self.step_elapsed = 0
         self.onehot_dim = fetch_num_sentence_commands()
         self.onehot_func = fetch_onehot_vector_from_sentence_command
         self.index_func = fetch_onehot_index_from_high_level_str
-        self.sentence = param.eval_keyword.lower()
         self.index_from_word = load_index_from_word()
         self.encoder_hidden, self.decoder_hidden, self.images = None, None, []
         self.initialize()
@@ -143,16 +141,12 @@ class HighLevelEvaluator(CheckpointBase):
         action = self._run_step(batch)
         return action
 
-    @property
-    def onehot_vector(self):
-        return self.onehot_func(self.cmd).view(1, self.onehot_dim)
-
     def _prepare_batch(self, image: np.ndarray, sentence: str):
         word_indices = [self.fetch_word_index(w) for w in sentence.lower().split(' ')]
         length = torch.tensor([len(word_indices)], dtype=torch.long)
         word_indices = torch.tensor(word_indices, dtype=torch.long)
         self.images.append(_tensor_from_numpy_image(image))
-        self.images = self.images[-10:]
+        self.images = self.images[-5:]
         data_dict = {
             'sentence': sentence.strip(),
             'word_indices': word_indices,

@@ -867,6 +867,9 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
             eval_keyword=eval_keyword, args=args, model_type='stop')
         self.high_param, self.high_evaluator = load_param_and_evaluator(
             eval_keyword=eval_keyword, args=args, model_type='high')
+        self.control_evaluator.model.eval()
+        self.stop_evaluator.model.eval()
+        self.high_evaluator.model.eval()
 
         # set image type
         self.image_type = self.high_param.image_type
@@ -880,7 +883,6 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
         self.high_sentences = self.eval_sentences
         self.softmax = torch.nn.Softmax(dim=1)
         EvaluationDirectory.__init__(self, *self.eval_info)
-        self.high_data_dict = dict()
         self.image_queue = image_queue
         self.audio_queue = audio_queue
         self.audio_setup_dict = audio_setup_dict
@@ -1005,7 +1007,6 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
         self.control_evaluator.initialize()
         self.stop_evaluator.initialize()
         self.high_evaluator.initialize()
-        self.high_data_dict[traj_index] = []
 
         last_sentence = None
         last_subtask = None
@@ -1052,9 +1053,7 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
                 self.high_param.eval_keyword = keyword
                 self.control_evaluator.param = self.control_param
                 self.stop_evaluator.param = self.stop_param
-                self.high_evaluator.cmd = keyword
                 self.high_evaluator.param = self.high_param
-                self.high_evaluator.sentence = keyword.lower()
                 self.control_evaluator.initialize()
                 self.stop_evaluator.initialize()
                 self.high_evaluator.initialize()
@@ -1090,10 +1089,6 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
                     action = self.softmax(action)
                     action_index = torch.argmax(action[-1], dim=0).item()
                     location = frame_snapshot.car_state.transform.location
-                    self.high_data_dict[traj_index].append((final_image, {
-                        'sentence': sentence,
-                        'location': (location.x, location.y),
-                        'action_index': action_index}))
                     sub_task = HIGH_LEVEL_COMMAND_NAMES[action_index]
                     # if self.last_sub_task != sub_task:
                     last_subtask = sub_task
