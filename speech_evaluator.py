@@ -858,6 +858,9 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
             eval_keyword=eval_keyword, args=args, model_type='stop')
         self.high_param, self.high_evaluator = load_param_and_evaluator(
             eval_keyword=eval_keyword, args=args, model_type='high')
+        self.high_evaluator.model.eval()
+        self.stop_evaluator.model.eval()
+        self.control_evaluator.model.eval()
 
         # set image type
         self.image_type = self.high_param.image_type
@@ -871,7 +874,6 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
         self.high_sentences = self.eval_sentences
         self.softmax = torch.nn.Softmax(dim=1)
         EvaluationDirectory.__init__(self, *self.eval_info)
-        self.high_data_dict = dict()
         self.audio_queue = audio_queue
         self.audio_setup_dict = audio_setup_dict
         self.last_sub_task = None
@@ -984,7 +986,6 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
         self.control_evaluator.initialize()
         self.stop_evaluator.initialize()
         self.high_evaluator.initialize()
-        self.high_data_dict[t] = []
         self.final_images = []
 
         # while not self.event.is_set():
@@ -1038,9 +1039,7 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
                 self.high_param.eval_keyword = keyword
                 self.control_evaluator.param = self.control_param
                 self.stop_evaluator.param = self.stop_param
-                self.high_evaluator.cmd = keyword
                 self.high_evaluator.param = self.high_param
-                self.high_evaluator.sentence = keyword.lower()
                 self.control_evaluator.initialize()
                 self.stop_evaluator.initialize()
                 self.high_evaluator.initialize()
@@ -1096,13 +1095,7 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
                     action = self.high_evaluator.run_step(final_image, sentence)
                     action = self.softmax(action)
                     action_index = torch.argmax(action[-1], dim=0).item()
-                    location = self.agent.fetch_car_state().transform.location
-                    self.high_data_dict[t].append((final_image, {
-                        'sentence': sentence,
-                        'location': (location.x, location.y),
-                        'action_index': action_index}))
                     sub_task = HIGH_LEVEL_COMMAND_NAMES[action_index]
-                    # if self.last_sub_task != sub_task:
                     self.last_sub_task = sub_task
                     logger.info('sentence: {}, sub-task: {}'.format(sentence, self.last_sub_task))
                     if action_index < 4:
@@ -1110,9 +1103,12 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
                         self.stop_evaluator.cmd = action_index
                         stop_buffer = []
                     else:
-                        logger.info('the task was finished by "finish"')
-                        status['finished'] = True
-                        break
+                        self.control_evaluator.cmd = 3
+                        self.stop_evaluator.cmd = 3
+                        stop_buffer = []
+                        # logger.info('the task was finished by "finish"')
+                        # status['finished'] = True
+                        # break
 
                 # run low-level evaluator to apply control and update stopped status
                 if count % EVAL_FRAMERATE_SCALE == 0:
@@ -1120,9 +1116,6 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
                     stop: float = self.stop_evaluator.run_step(final_image)
                     sub_goal = fetch_high_level_command_from_index(self.control_evaluator.cmd).lower()
                     logger.info('{} {:+6.4f}'.format(sub_goal, stop))
-                    # logger.info('throttle {:+6.4f}, steer {:+6.4f}, delayed {}, current {:d}, stop {:+6.4f}'.
-                    #             format(control.throttle, control.steer, frame - self.agent.image_frame_number, action_index,
-                    #                    stop))
                     self.agent.step_from_control(frame, control)
                     self.agent.save_stop(frame, stop, sub_goal)
                     self.agent.save_cmd(frame, self.sentence)
