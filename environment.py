@@ -662,7 +662,7 @@ def show_game(
 
 
 class GameEnvironment:
-    def __init__(self, args, agent_type: str, transform_index: int = 0):
+    def __init__(self, args, display, agent_type: str, transform_index: int = 0):
         self.args = args
         self.transform_index = transform_index
 
@@ -688,9 +688,10 @@ class GameEnvironment:
         if self.show_image:
             import pygame
             pygame.init()
-            self.display = pygame.display.set_mode(
-                (args.width * args.display_scale, args.height * args.display_scale),
-                pygame.HWSURFACE | pygame.DOUBLEBUF)
+            self.display = display
+            # self.display = pygame.display.set_mode(
+            #     (args.width * args.display_scale, args.height * args.display_scale),
+            #     pygame.HWSURFACE | pygame.DOUBLEBUF)
             self.font = get_font()
 
         set_world_asynchronous(self.world)

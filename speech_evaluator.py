@@ -28,6 +28,8 @@ from data.types import DriveDataFrame, LengthComputer
 from environment import set_world_asynchronous, set_world_synchronous, GameEnvironment
 from evaluator import ExperimentArgument, load_param_and_evaluator, load_evaluation_dataset, \
     get_random_sentence_from_keyword, listen_keyboard
+from no_rendering_mode import game_loop, DisplayArgument, HUD, World, TITLE_HUD, TITLE_WORLD, InputControl, TITLE_INPUT, \
+    COLOR_ALUMINIUM_4
 from util.common import add_carla_module, get_logger, get_current_time, unique_with_islices
 from util.directory import EvaluationDirectory, mkdir_if_not_exists
 
@@ -844,7 +846,20 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
     def __init__(self, eval_keyword: str, language_queue, event, audio_queue, audio_setup_dict, traj_index, args):
         self.eval_keyword = eval_keyword
         args.show_game = True
-        GameEnvironment.__init__(self, args=args, agent_type='evaluation')
+
+        pygame.init()
+        display = pygame.display.set_mode(((88 + 200) * 8, 88 * 8), pygame.HWSURFACE | pygame.DOUBLEBUF)
+        GameEnvironment.__init__(self, args=args, display=display, agent_type='evaluation')
+
+        self.iwidth, self.iheight = 200 * 8, 88 * 8
+        dargs = DisplayArgument()
+        self.map_display = pygame.Surface((dargs.width, self.iheight))
+        pygame.display.flip()
+
+        self.clock = pygame.time.Clock()
+        self.input_control = InputControl(TITLE_INPUT, dict(), event)
+        self.hud = HUD(TITLE_HUD, dargs.width, dargs.height)
+        self.dworld = World(TITLE_WORLD, dargs, timeout=2.0, world=self.world)
 
         self.event = event
         self.language_queue = language_queue
@@ -995,12 +1010,7 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
         self.stop_evaluator.initialize()
         self.high_evaluator.initialize()
         self.final_images = []
-
-        # while not self.event.is_set():
-        #     if not self.language_queue.empty():
-        #         self.sentence = self.language_queue.get()
-        #     if self.sentence is not None:
-        #         break
+        self.input_control.status = status
 
         self.sentence = None
         self.last_sub_task = None
@@ -1008,7 +1018,6 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
 
         count = 0
         frame = None
-        clock = pygame.time.Clock()
 
         set_world_asynchronous(self.world)
         sleep(0.5)
@@ -1017,22 +1026,27 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
         agent_len = LengthComputer()
         stop_buffer = []
         while not status['exited'] or not status['collided']:
-            keyboard_input = listen_keyboard()
-            updated = False
-            if keyboard_input == 'q':
-                status['exited'] = True
-                self.event.set()
-                logger.info('event was triggered')
+            if self.input_control.status['exited'] or self.input_control.status['finished']:
                 break
-            elif keyboard_input == 'r':
-                status['restart'] = True
-                logger.info('restarted by the user')
-                return status
-            elif keyboard_input == 's':
-                status['finished'] = True
-                logger.info('finished by the user')
-                break
+            elif self.input_control.status['restart']:
+                return self.input_control.status
 
+            # keyboard_input = listen_keyboard()
+            # updated = False
+            # if keyboard_input == 'q':
+            #     status['exited'] = True
+            #     self.event.set()
+            #     logger.info('event was triggered')
+            #     break
+            # elif keyboard_input == 'r':
+            #     status['restart'] = True
+            #     logger.info('restarted by the user')
+            #     return status
+            # elif keyboard_input == 's':
+            #     status['finished'] = True
+            #     logger.info('finished by the user')
+            #     break
+            updated = False
             if not self.language_queue.empty():
                 updated = True
                 self.sentence = self.language_queue.get()
@@ -1062,8 +1076,7 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
                 status['restart'] = True
                 return status
 
-            clock.tick()
-            self.world.tick()
+            print(self.clock.tick())
             try:
                 ts = self.world.wait_for_tick()
             except RuntimeError as e:
@@ -1081,8 +1094,21 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
             if self.agent.segment_frame is None:
                 continue
 
+            self.world.tick()
+            self.dworld.tick(self.clock)
+            self.hud.tick(self.clock)
+            self.input_control.tick(self.clock)
+
+            self.map_display.fill(COLOR_ALUMINIUM_4)
+            self.dworld.render(self.map_display)
+            self.hud.render(self.map_display)
+            self.input_control.render(self.map_display)
+
+            self.display.blit(self.map_display, (self.iwidth, 0))
+            pygame.display.flip()
+
             if self.show_image and self.original_image is not None:
-                self.show(self.original_image, clock, extra_str=self.sentence)
+                self.show(self.original_image, self.clock, extra_str=self.sentence)
 
             final_image = self.final_image
             print(frame, final_image.shape)
@@ -1154,10 +1180,15 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
         if self.control_evaluator is None or self.stop_evaluator is None:
             raise ValueError('evaluation call function was not set')
 
+        # Start
+        self.input_control.start(self.hud, self.dworld)
+        self.hud.start()
+        self.dworld.start(self.hud, self.input_control)
+
         old_indices = self.traj_indices_from_state_dir()
         exited = False
-        while len(old_indices) < len(self.eval_transforms) and not exited and not self.event.is_set():
-            try:
+        try:
+            while len(old_indices) < len(self.eval_transforms) and not exited and not self.event.is_set():
                 t = 0
                 while t < len(self.eval_transforms):
                     if t in old_indices:
@@ -1176,12 +1207,16 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
                     if run_status['saved']:
                         old_indices.add(t)
                     t += 1
-            finally:
                 old_indices = self.traj_indices_from_state_dir()
-        set_world_asynchronous(self.world)
-        if self.agent is not None:
-            self.agent.destroy()
-        self.event.set()
+        finally:
+            set_world_asynchronous(self.world)
+            if self.agent is not None:
+                self.agent.destroy()
+            self.event.set()
+
+            if self.dworld is not None:
+                self.dworld.destroy()
+            pygame.quit()
         return not exited
 
 
@@ -1381,6 +1416,7 @@ def main():
         Process(target=launch_recognizer,
                 args=(language_queue, event, directory.audio_path, audio_queue, audio_setup_dict, traj_index, )),
         Process(target=audio_saver, args=(directory, audio_queue, event,)),
+        # Process(target=game_loop, args=(display, )),
     ]
     for p in processes:
         p.start()

@@ -37,6 +37,7 @@ Welcome to CARLA No-Rendering Mode Visualizer
 import glob
 import os
 import sys
+from typing import Tuple
 
 try:
     sys.path.append(glob.glob('../carla/dist/carla-*%d.%d-%s.egg' % (
@@ -85,6 +86,7 @@ try:
     from pygame.locals import K_q
     from pygame.locals import K_s
     from pygame.locals import K_w
+    from pygame.locals import K_r
 except ImportError:
     raise RuntimeError('cannot import pygame, make sure pygame package is installed')
 
@@ -816,17 +818,14 @@ class MapImage(object):
 
 
 class World(object):
-    def __init__(self, name, args, timeout):
+    def __init__(self, name, args, timeout, world):
         self.client = None
         self.name = name
         self.args = args
         self.timeout = timeout
-        self.server_fps = 0.0
-        self.simulation_time = 0
-        self.server_clock = pygame.time.Clock()
 
         # World data
-        self.world = None
+        self.world = world
         self.town_map = None
         self.actors_with_transforms = []
 
@@ -856,26 +855,25 @@ class World(object):
         self.hero_surface = None
         self.actors_surface = None
 
-    def _get_data_from_carla(self):
-        try:
-            self.client = carla.Client(self.args.host, self.args.port)
-            self.client.set_timeout(self.timeout)
-
-            if self.args.map is None:
-                world = self.client.get_world()
-            else:
-                world = self.client.load_world(self.args.map)
-
-            town_map = world.get_map()
-            return (world, town_map)
-
-        except RuntimeError as ex:
-            logging.error(ex)
-            exit_game()
+    # def _get_data_from_carla(self):
+    #     try:
+    #         self.client = carla.Client(self.args.host, self.args.port)
+    #         self.client.set_timeout(self.timeout)
+    #
+    #         if self.args.map is None:
+    #             world = self.client.get_world()
+    #         else:
+    #             world = self.client.load_world(self.args.map)
+    #
+    #         town_map = world.get_map()
+    #         return (world, town_map)
+    #
+    #     except RuntimeError as ex:
+    #         logging.error(ex)
+    #         exit_game()
 
     def start(self, hud, input_control):
-        self.world, self.town_map = self._get_data_from_carla()
-
+        self.town_map = self.world.get_map()
         settings = self.world.get_settings()
         settings.no_rendering_mode = self.args.no_rendering
         self.world.apply_settings(settings)
@@ -926,8 +924,8 @@ class World(object):
         self._input.wheel_offset = MAP_DEFAULT_SCALE  # HERO_DEFAULT_SCALE
         self._input.control = carla.VehicleControl()
 
-        weak_self = weakref.ref(self)
-        self.world.on_tick(lambda timestamp: World.on_world_tick(weak_self, timestamp))
+        # weak_self = weakref.ref(self)
+        # self.world.on_tick(lambda timestamp: World.on_world_tick(weak_self, timestamp))
 
     def select_hero_actor(self):
         hero_vehicles = [actor for actor in self.world.get_actors(
@@ -960,60 +958,6 @@ class World(object):
         self.actors_with_transforms = [(actor, actor.get_transform()) for actor in actors]
         if self.hero_actor is not None:
             self.hero_transform = self.hero_actor.get_transform()
-        self.update_hud_info(clock)
-
-    def update_hud_info(self, clock):
-        hero_mode_text = []
-        if self.hero_actor is not None:
-            hero_speed = self.hero_actor.get_velocity()
-            hero_speed_text = 3.6 * math.sqrt(hero_speed.x ** 2 + hero_speed.y ** 2 + hero_speed.z ** 2)
-
-            affected_traffic_light_text = 'None'
-            if self.affected_traffic_light is not None:
-                state = self.affected_traffic_light.state
-                if state == carla.TrafficLightState.Green:
-                    affected_traffic_light_text = 'GREEN'
-                elif state == carla.TrafficLightState.Yellow:
-                    affected_traffic_light_text = 'YELLOW'
-                else:
-                    affected_traffic_light_text = 'RED'
-
-            affected_speed_limit_text = self.hero_actor.get_speed_limit()
-            if math.isnan(affected_speed_limit_text):
-                affected_speed_limit_text = 0.0
-            hero_mode_text = [
-                'Hero Mode:                 ON',
-                'Hero ID:              %7d' % self.hero_actor.id,
-                'Hero Vehicle:  %14s' % get_actor_display_name(self.hero_actor, truncate=14),
-                'Hero Speed:          %3d km/h' % hero_speed_text,
-                'Hero Affected by:',
-                '  Traffic Light: %12s' % affected_traffic_light_text,
-                '  Speed Limit:       %3d km/h' % affected_speed_limit_text
-            ]
-        else:
-            hero_mode_text = ['Hero Mode:                OFF']
-
-        self.server_fps = self.server_clock.get_fps()
-        self.server_fps = 'inf' if self.server_fps == float('inf') else round(self.server_fps)
-        info_text = [
-            'Server:  % 16s FPS' % self.server_fps,
-            'Client:  % 16s FPS' % round(clock.get_fps()),
-            'Simulation Time: % 12s' % datetime.timedelta(seconds=int(self.simulation_time)),
-            'Map Name:          %10s' % self.town_map.name,
-        ]
-
-        self._hud.add_info(self.name, info_text)
-        self._hud.add_info('HERO', hero_mode_text)
-
-    @staticmethod
-    def on_world_tick(weak_self, timestamp):
-        self = weak_self()
-        if not self:
-            return
-
-        self.server_clock.tick()
-        self.server_fps = self.server_clock.get_fps()
-        self.simulation_time = timestamp.elapsed_seconds
 
     def _split_actors(self):
         vehicles = []
@@ -1284,7 +1228,7 @@ class World(object):
 
 
 class InputControl(object):
-    def __init__(self, name):
+    def __init__(self, name, status, trigger):
         self.name = name
         self.mouse_pos = (0, 0)
         self.mouse_offset = [0.0, 0.0]
@@ -1304,6 +1248,8 @@ class InputControl(object):
                 'mouse_pos': [0, 0],
                 'scale_offset': [0, 0]}
         }
+        self.status = status
+        self.trigger = trigger
 
     def start(self, hud, world):
         self._hud = hud
@@ -1342,10 +1288,14 @@ class InputControl(object):
         self.mouse_pos = pygame.mouse.get_pos()
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
-                exit_game()
+                self.status['exited'] = True
+                self.trigger.set()
+                # exit_game()
             elif event.type == pygame.KEYUP:
                 if self._is_quit_shortcut(event.key):
-                    exit_game()
+                    self.status['exited'] = True
+                    self.trigger.set()
+                    # exit_game()
                 elif event.key == K_h or (event.key == K_SLASH and pygame.key.get_mods() & KMOD_SHIFT):
                     self._hud.help.toggle()
                 elif event.key == K_TAB:
@@ -1354,6 +1304,10 @@ class InputControl(object):
                     self._hud.show_info = not self._hud.show_info
                 elif event.key == K_i:
                     self._hud.show_actor_ids = not self._hud.show_actor_ids
+                elif event.key == K_s:
+                    self.status['finished'] = True
+                elif event.key == K_r:
+                    self.status['restart'] = True
                 elif isinstance(self.control, carla.VehicleControl):
                     if event.key == K_q:
                         self.control.gear = 1 if self.control.reverse else -1
@@ -1427,53 +1381,65 @@ class InputControl(object):
 # ==============================================================================
 
 
-def game_loop(args):
-    try:
-        # Init Pygame
-        pygame.init()
-        display = pygame.display.set_mode(
-            (args.width, args.height),
-            pygame.HWSURFACE | pygame.DOUBLEBUF)
-        pygame.display.set_caption(args.description)
+class DisplayArgument:
+    def __init__(self):
+        self.width = 88 * 8
+        self.height = 88 * 8
+        self.verbose = False
+        self.host = '127.0.0.1'
+        self.port = 7777
+        self.res = '704x704'
+        self.filter = 'vehicle.*'
+        self.map = None
+        self.no_rendering = False
+        self.show_triggers = False
+        self.show_connections = False
+        self.show_spawn_points = False
 
-        font = pygame.font.Font(pygame.font.get_default_font(), 20)
-        text_surface = font.render('Rendering map...', True, COLOR_WHITE)
-        display.blit(text_surface, text_surface.get_rect(center=(args.width / 2, args.height / 2)))
+
+def game_loop(display, carla_world):
+    dargs = DisplayArgument()
+    iwidth, iheight = 200 * 8, 88 * 8
+    try:
+        pygame.init()
+
+        map_display = pygame.Surface((dargs.width, iheight))
         pygame.display.flip()
 
         # Init
         input_control = InputControl(TITLE_INPUT)
-        hud = HUD(TITLE_HUD, args.width, args.height)
-        world = World(TITLE_WORLD, args, timeout=2.0)
+        hud = HUD(TITLE_HUD, dargs.width, dargs.height)
+        dworld = World(TITLE_WORLD, dargs, timeout=2.0, world=carla_world)
 
         # Start
-        input_control.start(hud, world)
+        input_control.start(hud, dworld)
         hud.start()
-        world.start(hud, input_control)
+        dworld.start(hud, input_control)
 
         clock = pygame.time.Clock()
         while True:
             clock.tick_busy_loop(60)
 
             # Tick
-            world.tick(clock)
+            dworld.tick(clock)
             hud.tick(clock)
             input_control.tick(clock)
 
             # Render
-            display.fill(COLOR_ALUMINIUM_4)
-            world.render(display)
-            hud.render(display)
-            input_control.render(display)
+            map_display.fill(COLOR_ALUMINIUM_4)
+            dworld.render(map_display)
+            hud.render(map_display)
+            input_control.render(map_display)
 
+            display.blit(map_display, (iwidth, 0))
             pygame.display.flip()
 
     except KeyboardInterrupt:
         print('\nCancelled by user. Bye!')
 
     finally:
-        if world is not None:
-            world.destroy()
+        if dworld is not None:
+            dworld.destroy()
 
 
 def exit_game():
@@ -1485,70 +1451,75 @@ def exit_game():
 # ==============================================================================
 
 
-def main():
-    # Parse arguments
-    argparser = argparse.ArgumentParser(
-        description='CARLA No Rendering Mode Visualizer')
-    argparser.add_argument(
-        '-v', '--verbose',
-        action='store_true',
-        dest='debug',
-        help='print debug information')
-    argparser.add_argument(
-        '--host',
-        metavar='H',
-        default='127.0.0.1',
-        help='IP of the host server (default: 127.0.0.1)')
-    argparser.add_argument(
-        '-p', '--port',
-        metavar='P',
-        default=2000,
-        type=int,
-        help='TCP port to listen to (default: 2000)')
-    argparser.add_argument(
-        '--res',
-        metavar='WIDTHxHEIGHT',
-        default='1280x720',
-        help='window resolution (default: 1280x720)')
-    argparser.add_argument(
-        '--filter',
-        metavar='PATTERN',
-        default='vehicle.*',
-        help='actor filter (default: "vehicle.*")')
-    argparser.add_argument(
-        '--map',
-        metavar='TOWN',
-        default=None,
-        help='start a new episode at the given TOWN')
-    argparser.add_argument(
-        '--no-rendering',
-        action='store_true',
-        help='switch off server rendering')
-    argparser.add_argument(
-        '--show-triggers',
-        action='store_true',
-        help='show trigger boxes of traffic signs')
-    argparser.add_argument(
-        '--show-connections',
-        action='store_true',
-        help='show waypoint connections')
-    argparser.add_argument(
-        '--show-spawn-points',
-        action='store_true',
-        help='show recommended spawn points')
+def main2():
+    display = pygame.display.set_mode(((88 + 200) * 8, 88 * 8), pygame.HWSURFACE | pygame.DOUBLEBUF)
+    game_loop(display)
 
-    args = argparser.parse_args()
-    args.description = argparser.description
-    args.width, args.height = [int(x) for x in args.res.split('x')]
 
-    log_level = logging.DEBUG if args.debug else logging.INFO
-    logging.basicConfig(format='%(levelname)s: %(message)s', level=log_level)
-
-    logging.info('listening to server %s:%s', args.host, args.port)
-    print(__doc__)
-
-    game_loop(args)
+# def main():
+#     # Parse arguments
+#     argparser = argparse.ArgumentParser(
+#         description='CARLA No Rendering Mode Visualizer')
+#     argparser.add_argument(
+#         '-v', '--verbose',
+#         action='store_true',
+#         dest='debug',
+#         help='print debug information')
+#     argparser.add_argument(
+#         '--host',
+#         metavar='H',
+#         default='127.0.0.1',
+#         help='IP of the host server (default: 127.0.0.1)')
+#     argparser.add_argument(
+#         '-p', '--port',
+#         metavar='P',
+#         default=2000,
+#         type=int,
+#         help='TCP port to listen to (default: 2000)')
+#     argparser.add_argument(
+#         '--res',
+#         metavar='WIDTHxHEIGHT',
+#         default='704x704',
+#         help='window resolution (default: 1280x720)')
+#     argparser.add_argument(
+#         '--filter',
+#         metavar='PATTERN',
+#         default='vehicle.*',
+#         help='actor filter (default: "vehicle.*")')
+#     argparser.add_argument(
+#         '--map',
+#         metavar='TOWN',
+#         default=None,
+#         help='start a new episode at the given TOWN')
+#     argparser.add_argument(
+#         '--no-rendering',
+#         action='store_true',
+#         help='switch off server rendering')
+#     argparser.add_argument(
+#         '--show-triggers',
+#         action='store_true',
+#         help='show trigger boxes of traffic signs')
+#     argparser.add_argument(
+#         '--show-connections',
+#         action='store_true',
+#         help='show waypoint connections')
+#     argparser.add_argument(
+#         '--show-spawn-points',
+#         action='store_true',
+#         help='show recommended spawn points')
+#
+#     args = argparser.parse_args()
+#     args.description = argparser.description
+#     args.width, args.height = [int(x) for x in args.res.split('x')]
+#
+#     log_level = logging.DEBUG if args.debug else logging.INFO
+#     logging.basicConfig(format='%(levelname)s: %(message)s', level=log_level)
+#
+#     logging.info('listening to server %s:%s', args.host, args.port)
+#     print(__doc__)
+#
+#     game_loop(args)
 
 
 if __name__ == '__main__':
-    main()
+    main2()
