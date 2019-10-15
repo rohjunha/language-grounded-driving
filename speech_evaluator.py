@@ -11,6 +11,7 @@ import shutil
 import wave
 from copy import deepcopy
 from functools import partial
+from math import ceil
 from multiprocessing import Queue, Process, Event
 from operator import attrgetter, itemgetter
 from pathlib import Path
@@ -28,6 +29,8 @@ from data.types import DriveDataFrame, LengthComputer
 from environment import set_world_asynchronous, set_world_synchronous, GameEnvironment
 from evaluator import ExperimentArgument, load_param_and_evaluator, load_evaluation_dataset, \
     get_random_sentence_from_keyword, listen_keyboard
+from no_rendering_mode import MapImage, PIXELS_PER_METER, COLOR_SKY_BLUE_0, COLOR_CHOCOLATE_1, COLOR_CHAMELEON_0, \
+    COLOR_ALUMINIUM_4, HERO_DEFAULT_SCALE, MAP_DEFAULT_SCALE, TITLE_INPUT, COLOR_BLACK
 from util.common import add_carla_module, get_logger, get_current_time, unique_with_islices
 from util.directory import EvaluationDirectory, mkdir_if_not_exists
 
@@ -840,11 +843,267 @@ def launch_recognizer(language_queue, event, audio_path_func, audio_queue, audio
     event.set()
 
 
+class DisplayArgument:
+    def __init__(self):
+        self.width = 88 * 8
+        self.height = 88 * 8
+        self.verbose = False
+        self.host = '127.0.0.1'
+        self.port = 7777
+        self.res = '704x704'
+        self.filter = 'vehicle.*'
+        self.map = None
+        self.no_rendering = False
+        self.show_triggers = False
+        self.show_connections = False
+        self.show_spawn_points = False
+
+
+def exit_game():
+    pygame.quit()
+    sys.exit()
+
+
+class GameStatus:
+    def __init__(self):
+        self.exited = False  # has to finish the entire loop
+        self.finished = False  # this procedure has been finished successfully
+        self.saved = False  # successfully saved the evaluation data
+        self.collided = False  # the agent has collided
+        self.restart = False  # this has to be restarted
+        self.stopped = False  # low-level controller returns stop
+
+    @property
+    def break_inner_loop(self) -> bool:
+        return self.exited or self.finished or self.restart
+
+    @property
+    def continued(self) -> bool:
+        return not self.exited or not self.collided
+
+    def __str__(self):
+        return '\n'.join(['{}: {}'.format(k, v) for k, v in self.__dict__.items()])
+
+    def __repr__(self):
+        return str(self)
+
+
+class InputControl:
+    def __init__(self, event):
+        self.event = event
+        self.mouse_pos = (0, 0)
+        self.mouse_offset = [-750, -75]
+        self.wheel_offset = 0.2  # 0.1
+        self.wheel_amount = 0.025
+        self._steer_cache = 0.0
+        self.control = None
+        self._autopilot_enabled = False
+        self._hud = None
+        self._world = None
+        self._mode = 'map'
+        self._offset = {
+            'hero': {'wheel': HERO_DEFAULT_SCALE},
+            'map': {
+                'wheel': MAP_DEFAULT_SCALE,
+                'mouse_offset': [0, 0],
+                'mouse_pos': [0, 0],
+                'scale_offset': [0, 0]}
+        }
+
+    def start(self, hud, world):
+        self._hud = hud
+        self._world = world
+        self._hud.notification("Press 'H' or '?' for help.", seconds=4.0)
+
+    def render(self, display):
+        pass
+
+    def tick(self, clock):
+        self.parse_input(clock)
+
+    @property
+    def offset(self):
+        return self._offset[self._mode]
+
+    def toggle_mode(self):
+        if self._world.hero_actor is None:
+            self._mode = 'hero'
+            self._world.select_hero_actor()
+            self._hud.notification('Hero Mode')
+
+            self.wheel_offset = self.offset['wheel']
+        else:
+            self._mode = 'map'
+            self._world.hero_actor = None
+            self._hud.notification('Map Mode')
+
+            self.wheel_offset = self.offset['wheel']
+            self.mouse_offset = self.offset['mouse_offset']
+            self.mouse_pos = self.offset['mouse_pos']
+            self._world.scale_offset = self.offset['scale_offset']
+
+    def _parse_events(self, status: GameStatus) -> GameStatus:
+        self.mouse_pos = pygame.mouse.get_pos()
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                self.event.set()
+                status.exited = True
+            elif event.type == pygame.KEYUP:
+                if self._is_quit_shortcut(event.key):
+                    self.event.set()
+                    status.exited = True
+                elif event.key == pygame.K_r:
+                    status.restart = True
+                elif event.key == pygame.K_s:
+                    status.finished = True
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                if event.button == 4:
+                    self.wheel_offset += self.wheel_amount
+                    if self.wheel_offset >= 1.0:
+                        self.wheel_offset = 1.0
+                elif event.button == 5:
+                    self.wheel_offset -= self.wheel_amount
+                    if self.wheel_offset <= 0.1:
+                        self.wheel_offset = 0.1
+                self.offset['wheel'] = self.wheel_offset
+        return status
+
+    def _parse_mouse(self):
+        if pygame.mouse.get_pressed()[0]:
+            x, y = pygame.mouse.get_pos()
+            self.mouse_offset[0] += (1.0 / self.wheel_offset) * (x - self.mouse_pos[0])
+            self.mouse_offset[1] += (1.0 / self.wheel_offset) * (y - self.mouse_pos[1])
+            self.mouse_pos = (x, y)
+            self.offset['mouse_offset'] = self.mouse_offset
+            self.offset['mouse_pos'] = self.mouse_pos
+
+    def parse_input(self, status: GameStatus) -> GameStatus:
+        status = self._parse_events(status)
+        self._parse_mouse()
+        return status
+
+    @staticmethod
+    def _is_quit_shortcut(key):
+        return (key == pygame.K_ESCAPE) or (key == pygame.K_q and pygame.key.get_mods() & pygame.KMOD_CTRL)
+
+
+class MapDisplay:
+    def __init__(self, map_image, input_control, offset, width, height):
+        self.map_image: MapImage = map_image
+        self.input_control: InputControl = input_control
+        self.width = width
+        self.height = height
+        self.offset = offset
+
+        self.surface_size = self.map_image.big_map_surface.get_width()
+        self.actors_surface = pygame.Surface((self.map_image.surface.get_width(), self.map_image.surface.get_height()))
+        self.actors_surface.set_colorkey(COLOR_BLACK)
+        self.result_surface = pygame.Surface((self.surface_size, self.surface_size)).convert()
+        self.result_surface.set_colorkey(COLOR_BLACK)
+
+        self.scale_offset = [0, 0]
+        self.scaled_size = int(self.surface_size)
+        self.prev_scaled_size = int(self.surface_size)
+
+    def _compute_scale(self, scale_factor):
+        m = self.input_control.mouse_pos
+
+        # Percentage of surface where mouse position is actually
+        px = (m[0] - self.scale_offset[0]) / float(self.prev_scaled_size)
+        py = (m[1] - self.scale_offset[1]) / float(self.prev_scaled_size)
+
+        # Offset will be the previously accumulated offset added with the
+        # difference of mouse positions in the old and new scales
+        diff_between_scales = ((float(self.prev_scaled_size) * px) - (float(self.scaled_size) * px),
+                               (float(self.prev_scaled_size) * py) - (float(self.scaled_size) * py))
+
+        self.scale_offset = (self.scale_offset[0] + diff_between_scales[0],
+                             self.scale_offset[1] + diff_between_scales[1])
+
+        # Update previous scale
+        self.prev_scaled_size = self.scaled_size
+
+        # Scale performed
+        self.map_image.scale_map(scale_factor)
+
+    def render(self, display, vehicles):
+        if not vehicles:
+            return
+        self.result_surface.fill(COLOR_BLACK)
+
+        scale_factor = self.input_control.wheel_offset
+        self.map_image.scale_map(scale_factor)
+        self.scaled_size = int(self.map_image.width * scale_factor)
+        # if self.scaled_size != self.prev_scaled_size:
+        #     self._compute_scale(scale_factor)
+        self.actors_surface.fill(COLOR_BLACK)
+        self.render_vehicles(self.actors_surface, vehicles)
+
+        surfaces = ((self.map_image.surface, (0, 0)),
+                    (self.actors_surface, (0, 0)))
+
+        # Translation offset
+        translation_offset = (self.input_control.mouse_offset[0] * scale_factor + self.scale_offset[0],
+                              self.input_control.mouse_offset[1] * scale_factor + self.scale_offset[1])
+        center_offset = (abs(display.get_width() - self.surface_size) / 2 * scale_factor, 0)
+        # # translation_offset[0] + center_offset = -9
+        # # translation_offset[1] = -19
+        # print('map_image scale: {}'.format(self.map_image.scale))
+        # print('map_image width: {}'.format(self.map_image.surface.get_width()))
+        # print('scale factor: {}'.format(scale_factor))
+        # print('scaled size: {}'.format(self.scaled_size))
+        # print('mouse offset: {}'.format(self.input_control.mouse_offset))
+        # print('scale offset: {}'.format(self.scale_offset))
+        # print('trans offset: {}'.format(translation_offset))
+        # print('center offset: {}'.format(center_offset))
+        # print('offset x: {}, offset y: {}'.format(translation_offset[0] + center_offset[0], translation_offset[1]))
+
+        clipping_rect = pygame.Rect(-translation_offset[0] - center_offset[0], -translation_offset[1],
+                                    self.width, self.height)
+        self.actors_surface.set_clip(clipping_rect)
+        self.result_surface.set_clip(clipping_rect)
+        for surface in surfaces:
+            self.result_surface.blit(surface[0], surface[1], None, 0)
+        display.blit(self.result_surface, (self.offset - 20, -20))
+        # display.blit(self.result_surface, (translation_offset[0] + center_offset[0] + self.offset,
+        #                                    translation_offset[1]))
+
+    def render_vehicles(self, display, vehicles):
+        self._render_vehicles(display, vehicles, self.map_image.world_to_pixel)
+
+    def _render_vehicles(self, surface, list_v, world_to_pixel):
+        for v in list_v:
+            color = COLOR_SKY_BLUE_0
+            if int(v[0].attributes['number_of_wheels']) == 2:
+                color = COLOR_CHOCOLATE_1
+            if v[0].attributes['role_name'] == 'hero':
+                color = COLOR_CHAMELEON_0
+            # Compute bounding box points
+            bb = v[0].bounding_box.extent
+            corners = [carla.Location(x=-bb.x, y=-bb.y),
+                       carla.Location(x=bb.x - 0.8, y=-bb.y),
+                       carla.Location(x=bb.x, y=0),
+                       carla.Location(x=bb.x - 0.8, y=bb.y),
+                       carla.Location(x=-bb.x, y=bb.y),
+                       carla.Location(x=-bb.x, y=-bb.y)
+                       ]
+            v[1].transform(corners)
+            corners = [world_to_pixel(p) for p in corners]
+            pygame.draw.lines(surface, color, False, corners, int(ceil(4.0 * self.map_image.scale)))
+
+
 class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
     def __init__(self, eval_keyword: str, language_queue, event, audio_queue, audio_setup_dict, traj_index, args):
         self.eval_keyword = eval_keyword
         args.show_game = True
-        GameEnvironment.__init__(self, args=args, agent_type='evaluation')
+
+        pygame.init()
+        display = pygame.display.set_mode(((88 + 200) * 8, 88 * 8), pygame.HWSURFACE | pygame.DOUBLEBUF)
+        GameEnvironment.__init__(self, args=args, display=display, agent_type='evaluation')
+
+        self.iwidth, self.iheight = 200 * 8, 88 * 8
+        dargs = DisplayArgument()
+        pygame.display.flip()
 
         self.event = event
         self.language_queue = language_queue
@@ -862,6 +1121,17 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
         self.stop_evaluator.model.eval()
         self.control_evaluator.model.eval()
 
+        self.town_map = self.world.get_map()
+        self.map_image = MapImage(
+            carla_world=self.world,
+            carla_map=self.town_map,
+            pixels_per_meter=PIXELS_PER_METER,
+            show_triggers=False,
+            show_connections=False,
+            show_spawn_points=False)
+        self.input_control = InputControl(event)
+        self.map_display = MapDisplay(self.map_image, self.input_control, self.iwidth, 88 * 8, 88 * 8)
+
         # set image type
         self.image_type = self.high_param.image_type
         if 'd' in self.image_type:
@@ -878,6 +1148,23 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
         self.audio_setup_dict = audio_setup_dict
         self.last_sub_task = None
         self.sentence = None
+        self.vehicles = []
+
+    def register_vehicles(self):
+        self.vehicles = []
+        actors = self.world.get_actors()
+        actors_with_transforms = [(actor, actor.get_transform()) for actor in actors]
+        for actor_with_transform in actors_with_transforms:
+            actor = actor_with_transform[0]
+            if 'vehicle' in actor.type_id:
+                self.vehicles.append(actor_with_transform)
+
+    def render(self, display, clock):
+        if not self.vehicles:
+            return
+        self.show(self.original_image, clock, extra_str=self.sentence)
+        self.map_display.render(display, self.vehicles)
+        pygame.display.flip()
 
     @property
     def eval_info(self):
@@ -886,11 +1173,13 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
 
     @property
     def original_image(self):
-        return self.agent.image_frame
+        # return self.agent.image_frame
+        return self.agent.extra_image_frame
 
     @property
     def resized_image(self):
-        return cv2.resize(self.agent.image_frame, (200, 88))
+        # return cv2.resize(self.agent.image_frame, (200, 88))
+        return self.agent.image_frame
 
     @property
     def segment(self):
@@ -980,15 +1269,15 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
             json.dump(target_sensor.transform_dict, file, indent=4)
         return target_sensor.transform_dict
 
-    def run_single_trajectory(self, t: int, transform: carla.Transform) -> Dict[str, bool]:
-        status = {
-            'exited': False,  # has to finish the entire loop
-            'finished': False,  # this procedure has been finished successfully
-            'saved': False,  # successfully saved the evaluation data
-            'collided': False,  # the agent has collided
-            'restart': False,  # this has to be restarted
-            'stopped': True  # low-level controller returns stop
-        }
+    def run_single_trajectory(self, t: int, transform: carla.Transform) -> GameStatus:
+        # status = {
+        #     'exited': False,  # has to finish the entire loop
+        #     'finished': False,  # this procedure has been finished successfully
+        #     'saved': False,  # successfully saved the evaluation data
+        #     'collided': False,  # the agent has collided
+        #     'restart': False,  # this has to be restarted
+        #     'stopped': True  # low-level controller returns stop
+        # }
         self.agent.reset()
         self.agent.move_vehicle(transform)
         self.control_evaluator.initialize()
@@ -1016,50 +1305,43 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
 
         agent_len = LengthComputer()
         stop_buffer = []
-        while not status['exited'] or not status['collided']:
-            keyboard_input = listen_keyboard()
+        status = GameStatus()
+        while True:
             updated = False
-            if keyboard_input == 'q':
-                status['exited'] = True
-                self.event.set()
-                logger.info('event was triggered')
+            status = self.input_control.parse_input(status)
+            if status.exited or status.finished:
                 break
-            elif keyboard_input == 'r':
-                status['restart'] = True
-                logger.info('restarted by the user')
+            if status.restart:
                 return status
-            elif keyboard_input == 's':
-                status['finished'] = True
-                logger.info('finished by the user')
-                break
 
             if not self.language_queue.empty():
                 updated = True
                 self.sentence = self.language_queue.get()
                 logger.info('sentence was updated: {}'.format(self.sentence))
                 if self.sentence is None:
-                    status['finished'] = True
+                    status.finished = True
                     break
-                keyword = 'left'
-                self.eval_keyword = keyword
-                self.control_param.eval_keyword = keyword
-                self.stop_param.eval_keyword = keyword
-                self.high_param.eval_keyword = keyword
-                self.control_evaluator.param = self.control_param
-                self.stop_evaluator.param = self.stop_param
-                self.high_evaluator.param = self.high_param
+                # keyword = 'left'
+                # self.eval_keyword = keyword
+                # self.control_param.eval_keyword = keyword
+                # self.stop_param.eval_keyword = keyword
+                # self.high_param.eval_keyword = keyword
+                # self.control_evaluator.param = self.control_param
+                # self.stop_evaluator.param = self.stop_param
+                # self.high_evaluator.param = self.high_param
+                self.control_evaluator.cmd = 3
                 self.control_evaluator.initialize()
                 self.stop_evaluator.initialize()
                 self.high_evaluator.initialize()
 
             if frame is not None and self.agent.collision_sensor.has_collided(frame):
                 logger.info('collision was detected at frame #{}'.format(frame))
-                status['collided'] = True
+                status.collided = True
                 break
 
             if count > 2000 and agent_len.length < 0.5:
                 logger.info('simulation has a problem in going forward')
-                status['restart'] = True
+                status.restart = True
                 return status
 
             clock.tick()
@@ -1068,7 +1350,7 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
                 ts = self.world.wait_for_tick()
             except RuntimeError as e:
                 logger.error('runtime error: {}'.format(e))
-                status['restart'] = True
+                status.restart = True
                 return status
 
             if frame is not None:
@@ -1081,11 +1363,15 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
             if self.agent.segment_frame is None:
                 continue
 
+            self.register_vehicles()
+
             if self.show_image and self.original_image is not None:
-                self.show(self.original_image, clock, extra_str=self.sentence)
+                self.render(self.display, clock)
 
             final_image = self.final_image
-            print(frame, final_image.shape)
+            # print(frame, final_image.shape)
+            # cv2.imshow('final image', final_image)
+            # cv2.waitKey(33)
             self.final_images.append(final_image)
 
             if self.sentence is None:
@@ -1099,7 +1385,7 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
                 self.agent.save_cmd(frame, 'None')
             else:
                 # run high-level evaluator when stopped was triggered by the low-level controller
-                if status['stopped'] or self.control_evaluator.cmd == 3 and updated:
+                if status.stopped or self.control_evaluator.cmd == 3 and updated:
                     sentence = deepcopy(self.sentence)
                     action = self.high_evaluator.run_step(final_image, sentence)
                     action = self.softmax(action)
@@ -1131,7 +1417,7 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
                     agent_len(self.agent.data_frame_dict[self.agent.data_frame_number].state.transform.location)
                     stop_buffer.append(stop)
                     recent_buffer = stop_buffer[-3:]
-                    status['stopped'] = len(recent_buffer) > 2 and sum(list(map(lambda x: x > 0.0, recent_buffer))) > 1
+                    status.stopped = len(recent_buffer) > 2 and sum(list(map(lambda x: x > 0.0, recent_buffer))) > 1
             count += 1
 
         self.audio_queue.put({
@@ -1140,9 +1426,9 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
             'traj_index': t,
         })
         logger.info('saving information')
-        curr_eval_data = self.agent.export_eval_data(status['collided'], self.sentence)
+        curr_eval_data = self.agent.export_eval_data(status.collided, self.sentence)
         if curr_eval_data is not None:
-            status['saved'] = self.export_evaluation_data(t, curr_eval_data)
+            status.saved = self.export_evaluation_data(t, curr_eval_data)
         return status
 
     def run(self) -> bool:
@@ -1165,15 +1451,15 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
                         continue
                     self.traj_index = t
                     transform = self.eval_transforms[t]
-                    run_status = self.run_single_trajectory(t, transform)
-                    if run_status['exited']:
+                    status: GameStatus = self.run_single_trajectory(t, transform)
+                    if status.exited:
                         exited = True
                         break
-                    if run_status['finished']:
+                    if status.finished:
                         break
-                    if run_status['restart']:
+                    if status.restart:
                         continue
-                    if run_status['saved']:
+                    if status.saved:
                         old_indices.add(t)
                     t += 1
             finally:

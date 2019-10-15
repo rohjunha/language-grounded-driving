@@ -152,6 +152,7 @@ class HighLevelEvaluator(CheckpointBase):
         length = torch.tensor([len(word_indices)], dtype=torch.long)
         word_indices = torch.tensor(word_indices, dtype=torch.long)
         self.images.append(_tensor_from_numpy_image(image))
+        logger.info('got {} images for the high-level model'.format(len(self.images)))
         self.images = self.images[-5:]
         data_dict = {
             'sentence': sentence.strip(),

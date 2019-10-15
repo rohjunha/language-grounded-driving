@@ -402,6 +402,10 @@ class SynchronousAgent(ExperimentDirectory):
         return self.camera_sensor_dict['center'].image_frame
 
     @property
+    def extra_image_frame(self):
+        return self.camera_sensor_dict['extra'].image_frame
+
+    @property
     def segment_frame_number(self):
         return self.segment_sensor_dict['center'].image_frame_number
 
@@ -463,13 +467,17 @@ class SynchronousAgent(ExperimentDirectory):
                 partial(self.image_path, camera_keyword=camera_keyword),
                 self.timing_dict,
                 self.transform_dict,
-                self.image_width * self.args.display_scale,
-                self.image_height * self.args.display_scale,
+                self.image_width,  # * self.args.display_scale,
+                self.image_height,  # * self.args.display_scale,
                 camera_keyword)
             for camera_keyword in ['center']}
-        # self.camera_sensor_dict['extra'] = CameraSensor(
-        #     self.vehicle, partial(self.image_path, camera_keyword='extra'),
-        #     self.timing_dict, self.transform_dict, 1280, 720, 'extra')
+        self.camera_sensor_dict['extra'] = CameraSensor(
+            self.vehicle, partial(self.image_path, camera_keyword='extra'),
+            self.timing_dict,
+            self.transform_dict,
+            self.image_width * self.args.display_scale,
+            self.image_height * self.args.display_scale,
+            'extra')
 
     def set_segment_sensor(self):
         self.segment_sensor_dict = {
@@ -662,7 +670,7 @@ def show_game(
 
 
 class GameEnvironment:
-    def __init__(self, args, agent_type: str, transform_index: int = 0):
+    def __init__(self, args, display, agent_type: str, transform_index: int = 0):
         self.args = args
         self.transform_index = transform_index
 
@@ -688,9 +696,10 @@ class GameEnvironment:
         if self.show_image:
             import pygame
             pygame.init()
-            self.display = pygame.display.set_mode(
-                (args.width * args.display_scale, args.height * args.display_scale),
-                pygame.HWSURFACE | pygame.DOUBLEBUF)
+            self.display = display
+            # self.display = pygame.display.set_mode(
+            #     (args.width * args.display_scale, args.height * args.display_scale),
+            #     pygame.HWSURFACE | pygame.DOUBLEBUF)
             self.font = get_font()
 
         set_world_asynchronous(self.world)

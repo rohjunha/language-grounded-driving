@@ -456,6 +456,7 @@ class MapImage(object):
             pygame.image.save(self.big_map_surface, full_path)
 
         self.surface = self.big_map_surface
+        assert self.surface.get_width() > 0
 
     def draw_road_map(self, map_surface, carla_world, carla_map, world_to_pixel, world_to_pixel_width):
         map_surface.fill(COLOR_ALUMINIUM_4)
