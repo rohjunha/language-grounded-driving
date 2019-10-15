@@ -769,14 +769,24 @@ def listen_print_loop(responses, stream, language_queue):
         # line, so subsequent lines will overwrite them.
 
         if result.is_final:
+            sentence = transcript.strip().lower()
+            word_pair_list = [
+                ('2nd', 'second'),
+                ('chicklet', 'take a left'),
+                ('chocolate', 'take a left'),
+            ]
+            for old, new in word_pair_list:
+                sentence = sentence.replace(old, new)
 
             sys.stdout.write(GREEN)
             sys.stdout.write('\033[K')
-            sys.stdout.write(str(corrected_time) + ': ' + transcript.strip() + '\n')
+            sys.stdout.write(str(corrected_time) + ': ' + sentence + '\n')
             # logger.info((corrected_time, stream.start_time))
-            language_queue.put({'transcript': transcript.strip(),
-                      'start_time': stream.start_time,
-                      'end_time': stream.start_time + corrected_time})
+            language_queue.put({
+                'transcript': sentence,
+                  'start_time': stream.start_time,
+                  'end_time': stream.start_time + corrected_time
+            })
             stream.is_final_end_time = stream.result_end_time
             stream.last_transcript_was_final = True
 
@@ -1295,6 +1305,7 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
         self.control_evaluator.initialize()
         self.stop_evaluator.initialize()
         self.high_evaluator.initialize()
+        self.control_evaluator.cmd = 3
         self.final_images = []
         self.final_sentences = []
 
@@ -1322,9 +1333,9 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
         while True:
             updated = False
             status = self.input_control.parse_input(status)
-            if status.exited or status.finished:
+            if status.finished:
                 break
-            if status.restart:
+            if status.restart or status.exited:
                 return status
 
             if not self.language_queue.empty():
@@ -1345,7 +1356,7 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
                 # self.control_evaluator.param = self.control_param
                 # self.stop_evaluator.param = self.stop_param
                 # self.high_evaluator.param = self.high_param
-                self.control_evaluator.cmd = 3
+                # self.control_evaluator.cmd = 3
                 self.control_evaluator.initialize()
                 self.stop_evaluator.initialize()
                 self.high_evaluator.initialize()
@@ -1432,7 +1443,7 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
                     self.agent.save_cmd(frame, self.sentence)
                     agent_len(self.agent.data_frame_dict[self.agent.data_frame_number].state.transform.location)
                     stop_buffer.append(stop)
-                    recent_buffer = stop_buffer[-3:]
+                    recent_buffer = stop_buffer[-5:]
                     status.stopped = len(recent_buffer) > 2 and sum(list(map(lambda x: x > 0.0, recent_buffer))) > 1
             count += 1
 
@@ -1715,7 +1726,7 @@ def generate_video_from_replay(directory):
 
 if __name__ == '__main__':
     # directory = EvaluationDirectory(40, 'ls-town2', 72500, 'online')
-    # generate_video_with_audio(directory, 3, True)
+    # generate_video_with_audio(directory, 0, True)
     # generate_canonical_data_structure(directory, 7, True)
     # generate_video_from_replay(directory)
     main()
