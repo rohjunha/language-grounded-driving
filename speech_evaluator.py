@@ -136,6 +136,7 @@ def generate_video_with_audio(directory: EvaluationDirectory, traj_index: int, f
     root_dir = directory.root_dir
     timing_path = root_dir / 'audios/timing{:02d}.json'.format(traj_index)
     state_path = root_dir / 'states/traj{:02d}.json'.format(traj_index)
+    transcript_path = root_dir / 'audios/transcript{:02d}.json'.format(traj_index)
     tmp_video_path = root_dir / 'tmp{:02d}.mp4'.format(traj_index)
     out_audio_path = root_dir / 'audio{:02d}.wav'.format(traj_index)
     out_video_path = root_dir / 'video{:02d}.mp4'.format(traj_index)
@@ -721,7 +722,7 @@ class ResumableMicrophoneStream:
             yield final_data
 
 
-def listen_print_loop(responses, stream, queue):
+def listen_print_loop(responses, stream, language_queue):
     """Iterates through server responses and prints them.
     The responses passed is a generator that will block until a response
     is provided by the server.
@@ -772,8 +773,10 @@ def listen_print_loop(responses, stream, queue):
             sys.stdout.write(GREEN)
             sys.stdout.write('\033[K')
             sys.stdout.write(str(corrected_time) + ': ' + transcript.strip() + '\n')
-            queue.put(transcript.strip())
-
+            # logger.info((corrected_time, stream.start_time))
+            language_queue.put({'transcript': transcript.strip(),
+                      'start_time': stream.start_time,
+                      'end_time': stream.start_time + corrected_time})
             stream.is_final_end_time = stream.result_end_time
             stream.last_transcript_was_final = True
 
@@ -1152,6 +1155,7 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
         self.last_sub_task = None
         self.sentence = None
         self.vehicles = []
+        self.final_sentences = []
 
     def register_vehicles(self):
         self.vehicles = []
@@ -1242,11 +1246,16 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
         logger.info('controls, stops, goals {}, {}, {}'.format(len(controls), len(stops), len(sub_goals)))
 
         timing_dict = self.export_timing_dict(t)
+        self.export_language(t)
         self.export_video(t, 'center', curr_eval_data)
         # self.export_video(t, 'extra', curr_eval_data)
         self.export_segment_video(t)
 
         return self.state_path(t).exists()
+
+    def export_language(self, t: int):
+        with open(str(self.transcript_path(t)), 'w') as file:
+            json.dump(self.final_sentences, file, indent=4)
 
     def export_timing_dict(self, t: int):
         target_sensor = None
@@ -1287,6 +1296,7 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
         self.stop_evaluator.initialize()
         self.high_evaluator.initialize()
         self.final_images = []
+        self.final_sentences = []
 
         # while not self.event.is_set():
         #     if not self.language_queue.empty():
@@ -1319,11 +1329,14 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
 
             if not self.language_queue.empty():
                 updated = True
-                self.sentence = self.language_queue.get()
-                logger.info('sentence was updated: {}'.format(self.sentence))
-                if self.sentence is None:
+                language = self.language_queue.get()
+                if language is None:
                     status.finished = True
                     break
+                else:
+                    self.sentence = language['transcript']
+                    self.final_sentences.append(language)
+                    logger.info('sentence was updated: {}'.format(self.sentence))
                 # keyword = 'left'
                 # self.eval_keyword = keyword
                 # self.control_param.eval_keyword = keyword
@@ -1701,8 +1714,8 @@ def generate_video_from_replay(directory):
 
 
 if __name__ == '__main__':
-    directory = EvaluationDirectory(40, 'ls-town2', 72500, 'online')
-    generate_video_with_audio(directory, 3, True)
+    # directory = EvaluationDirectory(40, 'ls-town2', 72500, 'online')
+    # generate_video_with_audio(directory, 3, True)
     # generate_canonical_data_structure(directory, 7, True)
     # generate_video_from_replay(directory)
-    # main()
+    main()

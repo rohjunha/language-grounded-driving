@@ -223,6 +223,9 @@ class EvaluationDirectory:
     def timing_path(self, traj_index: int) -> Path:
         return self.audio_dir / 'timing{:02d}.json'.format(traj_index)
 
+    def transcript_path(self, traj_index: int) -> Path:
+        return self.audio_dir / 'transcript{:02d}.json'.format(traj_index)
+
     def transform_path(self, traj_index: int) -> Path:
         return self.replay_dir / 'transform{:02d}.json'.format(traj_index)
 
