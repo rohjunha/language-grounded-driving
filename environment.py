@@ -467,17 +467,17 @@ class SynchronousAgent(ExperimentDirectory):
                 partial(self.image_path, camera_keyword=camera_keyword),
                 self.timing_dict,
                 self.transform_dict,
-                self.image_width,  # * self.args.display_scale,
-                self.image_height,  # * self.args.display_scale,
+                self.image_width * self.args.display_scale,
+                self.image_height * self.args.display_scale,
                 camera_keyword)
             for camera_keyword in ['center']}
-        self.camera_sensor_dict['extra'] = CameraSensor(
-            self.vehicle, partial(self.image_path, camera_keyword='extra'),
-            self.timing_dict,
-            self.transform_dict,
-            self.image_width * self.args.display_scale,
-            self.image_height * self.args.display_scale,
-            'extra')
+        # self.camera_sensor_dict['extra'] = CameraSensor(
+        #     self.vehicle, partial(self.image_path, camera_keyword='extra'),
+        #     self.timing_dict,
+        #     self.transform_dict,
+        #     self.image_width * self.args.display_scale,
+        #     self.image_height * self.args.display_scale,
+        #     'extra')
 
     def set_segment_sensor(self):
         self.segment_sensor_dict = {

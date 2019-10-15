@@ -141,7 +141,10 @@ def generate_video_with_audio(directory: EvaluationDirectory, traj_index: int, f
     out_video_path = root_dir / 'video{:02d}.mp4'.format(traj_index)
     out_sub_path = root_dir / 'video{:02d}.vtt'.format(traj_index)
     # image_dir = root_dir / ('replays/images' if from_replay else 'images')
-    image_dir = root_dir / 'images'
+    image_dir = root_dir / 'images' / '{:02d}'.format(traj_index)
+    image_keyword = 'c'
+    image_path_fmt = '{:08d}' + image_keyword + '.png'
+    image_filter_fmt = '*' + image_keyword + '.png'
     audio_manager = AudioManager(directory)
     export_subtitle = False
 
@@ -152,7 +155,7 @@ def generate_video_with_audio(directory: EvaluationDirectory, traj_index: int, f
         return False
 
     def image_path_func(frame: int):
-        return image_dir / '{:08d}e.png'.format(frame)
+        return image_dir / image_path_fmt.format(frame)
 
     # read audio
     audio_data, audio_start_ts = audio_manager.load_audio_with_timing(traj_index)
@@ -172,7 +175,7 @@ def generate_video_with_audio(directory: EvaluationDirectory, traj_index: int, f
     def get_frame_from_image_path(image_path):
         return int(image_path.stem[:-1])
 
-    frame_from_images = [get_frame_from_image_path(p) for p in sorted(image_dir.glob('*e.png'))]
+    frame_from_images = [get_frame_from_image_path(p) for p in sorted(image_dir.glob(image_filter_fmt))]
     # print(len(frame_from_images))
     with open(str(timing_path), 'r') as file:
         raw_timing_dict = json.load(file)
@@ -1173,13 +1176,13 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
 
     @property
     def original_image(self):
-        # return self.agent.image_frame
-        return self.agent.extra_image_frame
+        return self.agent.image_frame
+        # return self.agent.extra_image_frame
 
     @property
     def resized_image(self):
-        # return cv2.resize(self.agent.image_frame, (200, 88))
-        return self.agent.image_frame
+        return cv2.resize(self.agent.image_frame, (200, 88))
+        # return self.agent.image_frame
 
     @property
     def segment(self):
@@ -1204,7 +1207,7 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
         else:
             raise TypeError('invalid image type {}'.format(self.image_type))
 
-    def export_video(self, t: int, camera_keyword: str, curr_eval_data: dict):
+    def export_video(self, traj_index: int, camera_keyword: str, curr_eval_data: dict):
         _, sub_goals = zip(*curr_eval_data['stop_frames'])
         texts = ['sentence: {}\nsub-task: {}'.format(s, g)
                  for g, s in zip(sub_goals, curr_eval_data['sentences'])]
@@ -1215,10 +1218,10 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
         drive_frames = set(text_dict.keys())
         common_frames = sorted(list(image_frames.intersection(drive_frames)))
         src_image_files = [self.agent.image_path(f, camera_keyword) for f in common_frames]
-        dst_image_files = [self.image_dir / p.name for p in src_image_files]
+        dst_image_files = [self.traj_image_dir(traj_index) / p.name for p in src_image_files]
         [shutil.copy(str(s), str(d)) for s, d in zip(src_image_files, dst_image_files)]
         text_list = [text_dict[f] for f in common_frames]
-        video_from_files(src_image_files, self.video_path(t, camera_keyword),
+        video_from_files(src_image_files, self.video_path(traj_index, camera_keyword),
                          texts=text_list, framerate=30, revert=True)
 
     def export_segment_video(self, t: int):
@@ -1698,8 +1701,8 @@ def generate_video_from_replay(directory):
 
 
 if __name__ == '__main__':
-    # directory = EvaluationDirectory(40, 'ls-town2', 72500, 'online')
-    # generate_video_with_audio(directory, 9, True)
+    directory = EvaluationDirectory(40, 'ls-town2', 72500, 'online')
+    generate_video_with_audio(directory, 3, True)
     # generate_canonical_data_structure(directory, 7, True)
     # generate_video_from_replay(directory)
-    main()
+    # main()

@@ -210,6 +210,12 @@ class EvaluationDirectory:
     def audio_path(self, timestamp) -> Path:
         return self.audio_dir / '{}.wav'.format(timestamp)
 
+    def traj_image_dir(self, traj_index):
+        return mkdir_if_not_exists(self.image_dir / '{:02d}'.format(traj_index))
+
+    def traj_segment_dir(self, traj_index):
+        return mkdir_if_not_exists(self.segment_dir / '{:02d}'.format(traj_index))
+
     @property
     def audio_info_path(self) -> Path:
         return self.audio_dir / 'info.json'
