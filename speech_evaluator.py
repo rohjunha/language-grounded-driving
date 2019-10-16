@@ -82,6 +82,7 @@ from multiprocessing import Manager
 
 
 TARGET_FPS = 15
+FASTFORWARD_RATIO = 5
 
 
 def save_audio(audio_path, audio_data):
@@ -170,7 +171,16 @@ def generate_video_with_audio(directory: EvaluationDirectory, traj_index: int, f
     subtask_dict = {i: s for i, s in zip(range(*frame_range), map(itemgetter(1), state_dict['stop_frames']))}
     len_frame_range = min(len(list(sentence_dict.keys())), len(list(subtask_dict.keys())))
     frame_range = frame_range[0], frame_range[0] + len_frame_range
-    # print('frame_range: {}'.format(frame_range))
+
+    # # read transcription timings
+    # with open(str(transcript_path), 'r') as file:
+    #     transcript_info_list = json.load(file)
+    # transcript_timing_list = [(v['start_time'], v['end_time']) for v in transcript_info_list]
+    # print(transcript_timing_list)
+    # for t1, t2 in transcript_timing_list:
+    #     s1 = (t1 - transcript_timing_list[0][0])
+    #     s2 = int(round(s1 + (t2 - t1) / 1e3))
+    #     print(s1, s2)
 
     # read timing dict and prune with images
     def get_frame_from_image_path(image_path):
@@ -202,13 +212,43 @@ def generate_video_with_audio(directory: EvaluationDirectory, traj_index: int, f
     diff_audio_len = int(round(diff_audio_ts / 1e3 * SAMPLE_WIDTH * SAMPLE_RATE))
     audio_data = audio_data[diff_audio_len:]
 
+    # update transcript timings
+    # transcript_timing_list = [(max(0, t1 - start_ts), max(0, t2 - start_ts)) for t1, t2 in transcript_timing_list]
+    # print(transcript_timing_list)
+
+    def check_if_fast_forward(query_ts, timing_list):
+        # print(query_ts - start_ts, [(t1 - start_ts, t2 - start_ts) for t1, t2 in timing_list])
+        for t1, t2 in timing_list:
+            if t1 < query_ts < t2:
+                return False
+        return True
+
     duration_audio = len(audio_data) / (SAMPLE_WIDTH * SAMPLE_RATE)
     duration_image = (sorted_timings[-1] - start_ts) / 1e3
     duration_state = (end_ts - start_ts) / 1e3
     duration = min(duration_audio, duration_image, duration_state)
+    end_ts = int(round(start_ts + duration * 1e3))
+
+    # timestamps = []
+    # last_fast_forward = None
+    # curr_ts = start_ts
+    # local_timestamps = []
+    # while curr_ts < end_ts:
+    #     fast_forward = check_if_fast_forward(curr_ts, transcript_timing_list)
+    #     if last_fast_forward != fast_forward:
+    #         if local_timestamps:
+    #             timestamps.append((last_fast_forward, local_timestamps))
+    #         last_fast_forward = fast_forward
+    #         local_timestamps = []
+    #     local_timestamps.append(curr_ts)
+    #     # print(curr_ts, fast_forward, last_fast_forward)
+    #     timestep = int(round(1e3 / TARGET_FPS * (FASTFORWARD_RATIO if fast_forward else 1.0)))
+    #     curr_ts += timestep
+    # # print(timestamps)
+    # return
+
     num_frames = int(round(duration * TARGET_FPS))
     timestamps = [int(round(start_ts + i * 1e3 / TARGET_FPS)) for i in range(num_frames)]
-    relative_timings = [(ts - start_ts) * TARGET_FPS / 1e3 for ts in timestamps]
     image_frames = [interpolate(ts) for ts in timestamps]
 
     image_path_list = [image_path_func(f) for f in image_frames]
@@ -784,8 +824,8 @@ def listen_print_loop(responses, stream, language_queue):
             # logger.info((corrected_time, stream.start_time))
             language_queue.put({
                 'transcript': sentence,
-                  'start_time': stream.start_time,
-                  'end_time': stream.start_time + corrected_time
+                'start_time': stream.start_time,
+                'end_time': stream.start_time + corrected_time
             })
             stream.is_final_end_time = stream.result_end_time
             stream.last_transcript_was_final = True
@@ -1725,8 +1765,8 @@ def generate_video_from_replay(directory):
 
 
 if __name__ == '__main__':
-    # directory = EvaluationDirectory(40, 'ls-town2', 72500, 'online')
-    # generate_video_with_audio(directory, 0, True)
+    directory = EvaluationDirectory(40, 'ls-town2', 72500, 'online')
+    generate_video_with_audio(directory, 3, True)
     # generate_canonical_data_structure(directory, 7, True)
     # generate_video_from_replay(directory)
-    main()
+    # main()
