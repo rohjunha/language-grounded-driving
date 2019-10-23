@@ -9,7 +9,7 @@ If you use "Conditional Driving from Natural Language Instruction" in your resea
 @inproceedings{Roh2019Conditional,
   title={{C}onditional Driving from Natural Language Instruction},
   author={Junha Roh and Chris Paxton and Andrzej Pronobis and Ali Farhadi and Dieter Fox},
-  booktitle={CoRL},
+  booktitle={Proceedings of the Conference on Robot Learning},
   year={2019}
 }
 ```
