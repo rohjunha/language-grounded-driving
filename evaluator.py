@@ -33,7 +33,7 @@ import numpy as np
 import pygame
 import torch
 
-from config import IMAGE_WIDTH, IMAGE_HEIGHT, EVAL_FRAMERATE_SCALE, DATASET_FRAMERATE
+from config import IMAGE_WIDTH, IMAGE_HEIGHT, EVAL_FRAMERATE_SCALE, DATASET_FRAMERATE, SCALE
 from data.dataset import load_index_from_word, generate_templated_sentence_dict, HighLevelDataset
 from util.road_option import fetch_road_option_from_str, fetch_onehot_vector_dim, fetch_onehot_vector_from_index, \
     fetch_num_sentence_commands, fetch_onehot_vector_from_sentence_command, fetch_onehot_index_from_high_level_str, \
@@ -1032,7 +1032,7 @@ class ExperimentArgument:
         self.port: int = info_dict['port']
         self.res: str = '200x88'
         self.width, self.height = [int(x) for x in self.res.split('x')]
-        self.display_scale = 8
+        self.display_scale = SCALE
         self.filter: str = 'vehicle.*'
         self.map: str = None
         self.speed: int = 20

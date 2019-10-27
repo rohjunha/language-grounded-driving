@@ -44,7 +44,7 @@ import torch
 import sys
 import re
 
-from config import EVAL_FRAMERATE_SCALE
+from config import EVAL_FRAMERATE_SCALE, SCALE
 from data.dataset import generate_templated_sentence_dict
 from util.road_option import fetch_high_level_command_from_index, HIGH_LEVEL_COMMAND_NAMES
 from util.image import video_from_files, video_from_memory
@@ -911,8 +911,8 @@ def launch_recognizer(language_queue, event, audio_path_func, audio_queue, audio
 
 class DisplayArgument:
     def __init__(self):
-        self.width = 88 * 8
-        self.height = 88 * 8
+        self.width = 88 * SCALE
+        self.height = 88 * SCALE
         self.verbose = False
         self.host = '127.0.0.1'
         self.port = 7777
@@ -1158,16 +1158,17 @@ class MapDisplay:
             pygame.draw.lines(surface, color, False, corners, int(ceil(4.0 * self.map_image.scale)))
 
 
+
 class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
     def __init__(self, eval_keyword: str, language_queue, event, audio_queue, audio_setup_dict, traj_index, args):
         self.eval_keyword = eval_keyword
         args.show_game = True
 
         pygame.init()
-        display = pygame.display.set_mode(((88 + 200) * 8, 88 * 8), pygame.HWSURFACE | pygame.DOUBLEBUF)
+        display = pygame.display.set_mode(((88 + 200) * SCALE, 88 * SCALE), pygame.HWSURFACE | pygame.DOUBLEBUF)
         GameEnvironment.__init__(self, args=args, display=display, agent_type='evaluation')
 
-        self.iwidth, self.iheight = 200 * 8, 88 * 8
+        self.iwidth, self.iheight = 200 * SCALE, 88 * SCALE
         dargs = DisplayArgument()
         pygame.display.flip()
 
@@ -1196,7 +1197,7 @@ class SpeechEvaluationEnvironment(GameEnvironment, EvaluationDirectory):
             show_connections=False,
             show_spawn_points=False)
         self.input_control = InputControl(event)
-        self.map_display = MapDisplay(self.map_image, self.input_control, self.iwidth, 88 * 8, 88 * 8)
+        self.map_display = MapDisplay(self.map_image, self.input_control, self.iwidth, 88 * SCALE, 88 * SCALE)
 
         # set image type
         self.image_type = self.high_param.image_type
