@@ -651,6 +651,15 @@ class ResumableMicrophoneStream:
     """Opens a recording stream as a generator yielding the audio chunks."""
 
     def __init__(self, rate, chunk_size, audio_path_func, audio_queue, event, traj_index):
+
+        # find logitech audio input
+        import pyaudio
+        p = pyaudio.PyAudio()
+        input_index = None
+        for i in range(p.get_device_count()):
+            if 'Logitech' in p.get_device_info_by_index(i)['name']:
+                input_index = i
+
         self._rate = rate
         self.chunk_size = chunk_size
         self._num_channels = 1
@@ -672,6 +681,7 @@ class ResumableMicrophoneStream:
             channels=self._num_channels,
             rate=self._rate,
             input=True,
+            input_device_index=input_index,
             frames_per_buffer=self.chunk_size,
             # Run the audio stream asynchronously to fill the buffer object.
             # This is necessary so that the input device's buffer doesn't
@@ -1765,8 +1775,8 @@ def generate_video_from_replay(directory):
 
 
 if __name__ == '__main__':
-    directory = EvaluationDirectory(40, 'ls-town2', 72500, 'online')
-    generate_video_with_audio(directory, 3, True)
+    #directory = EvaluationDirectory(40, 'ls-town2', 72500, 'online')
+    #generate_video_with_audio(directory, 3, True)
     # generate_canonical_data_structure(directory, 7, True)
     # generate_video_from_replay(directory)
-    # main()
+    main()
